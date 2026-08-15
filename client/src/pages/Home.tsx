@@ -50,6 +50,9 @@ export default function Home() {
   const [collapsed, setCollapsed] = useState(false);
   const [draft, setDraft] = useState("");
   const [importText, setImportText] = useState("");
+  const [stagedMessages, setStagedMessages] = useState<CorpusMessage[]>([]);
+  const [stagedRoles, setStagedRoles] = useState<Record<string, SpeakerRole>>({});
+  const [importReviewNote, setImportReviewNote] = useState("");
   const [search, setSearch] = useState("");
   const [workerUrl, setWorkerUrl] = useState(() => { const saved = localStorage.getItem("qianren-worker-url"); return saved === LEGACY_WORKER_URL ? DEFAULT_WORKER_URL : saved || DEFAULT_WORKER_URL; });
   const [onlineMode, setOnlineMode] = useState(() => localStorage.getItem("qianren-online-mode") === "true");
@@ -76,34 +79,62 @@ export default function Home() {
   const currentPersona = useMemo(() => createPersona(archive.messages, archive.roles), [archive.messages, archive.roles]);
   const persona = personaName(archive.messages, archive.roles);
   const speakers = useMemo(() => speakersFor(archive.messages), [archive.messages]);
-  const preview = useMemo(() => parseChatText(importText), [importText]);
+  const preview = useMemo(() => stagedMessages.length ? stagedMessages : parseChatText(importText), [importText, stagedMessages]);
+  const stagedSpeakers = useMemo(() => speakersFor(stagedMessages), [stagedMessages]);
+  const stagedKept = useMemo(() => stagedMessages.filter((message) => !message.ignored && (stagedRoles[message.speaker] === "me" || stagedRoles[message.speaker] === "ta")), [stagedMessages, stagedRoles]);
   const activeSession = archive.sessions.find((item) => item.id === archive.activeSessionId) ?? archive.sessions[0] ?? null;
   const integratedPortrait = useMemo(() => createIntegratedPortrait(archive), [archive]);
   const currentMeta = screenMeta[screen];
 
   const setArchiveSafely = (updater: (previous: ArchiveState) => ArchiveState) => setArchive((previous) => updater(previous));
 
-  const importRecords = (raw: string) => {
+  const prepareImport = (raw: string, sourceLabel = "文本") => {
     const incoming = parseChatText(raw);
     if (!incoming.length) {
-      toast.error("没有识别到可归档记录", { description: "请核对 OCR 文本，并使用 [08:43] 名称: 内容、日期 时间 名称: 内容或名称: 内容的格式。" });
+      toast.error("没有识别到可核对记录", { description: "请核对文本，建议使用“[08:43] 名称: 内容”或“日期 时间 名称: 内容”的格式。" });
       return;
     }
+    const suggestion = inferRoles(incoming, archive.profile);
+    setStagedMessages(incoming);
+    setStagedRoles(suggestion.roles);
+    setImportReviewNote(`${sourceLabel} 已解析 ${incoming.length} 段。${suggestion.note}`);
+    toast.success("已生成归档前预览", { description: "请确认谁是“我”、谁是“TA”，并检查灰色的默认过滤内容。" });
+  };
+
+  const commitStagedRecords = () => {
+    const meSpeakers = stagedSpeakers.filter((speaker) => stagedRoles[speaker] === "me");
+    const taSpeakers = stagedSpeakers.filter((speaker) => stagedRoles[speaker] === "ta");
+    if (!meSpeakers.length || !taSpeakers.length) {
+      toast.error("请先确认双方角色", { description: "归档前至少指定一位“我”和一位“TA”；不确定或无关内容可标记为“忽略”。" });
+      return;
+    }
+    if (!stagedKept.length) {
+      toast.error("没有可归档的有效对话", { description: "请至少保留一段真实消息，并为其指定“我”或“TA”。" });
+      return;
+    }
+    const incoming = stagedKept.map((message) => ({ ...message, id: uid("corpus"), ignored: false }));
     setArchiveSafely((previous) => {
       const merged = mergeMessages(previous.messages, incoming);
-      const suggestion = inferRoles(merged.all, previous.profile);
-      const roles = { ...suggestion.roles, ...previous.roles };
-      toast.success(`已归档 ${merged.added} 条记录`, { description: `${suggestion.note}${merged.duplicate ? ` 另有 ${merged.duplicate} 条重复记录未写入。` : ""}` });
+      const roles = { ...previous.roles, ...stagedRoles };
+      toast.success(`已归档 ${merged.added} 条已确认消息`, { description: `${merged.duplicate ? `${merged.duplicate} 条重复记录未再次写入。` : "已按核对后的来源顺序保存。"}` });
       return { ...previous, messages: merged.all, roles };
     });
     setImportText("");
+    setStagedMessages([]);
+    setStagedRoles({});
+    setImportReviewNote("");
   };
 
   const handleTextFile = (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     if (!file) return;
     const reader = new FileReader();
-    reader.onload = () => importRecords(String(reader.result ?? ""));
+    reader.onload = () => {
+      const text = String(reader.result ?? "");
+      setImportText(text);
+      setStagedMessages([]);
+      setImportReviewNote(`已读入 ${file.name}，请点击“生成核对预览”。`);
+    };
     reader.readAsText(file);
     event.target.value = "";
   };
@@ -116,13 +147,20 @@ export default function Home() {
     setOcrProgress(0);
     try {
       const parts: string[] = [];
+      let bubbleCount = 0;
+      let usedSideHints = false;
       for (let index = 0; index < files.length; index += 1) {
-        const text = await recognizeChatImage(files[index], (progress) => setOcrProgress((index + progress) / files.length));
-        if (text) parts.push(text);
+        const result = await recognizeChatImage(files[index], (progress) => setOcrProgress((index + progress) / files.length));
+        if (result.formattedText) parts.push(result.formattedText);
+        bubbleCount += result.detectedBubbles;
+        usedSideHints ||= result.usedSideHints;
       }
       if (!parts.length) throw new Error("没有从图片中识别到可读文字");
-      setImportText((previous) => `${previous ? `${previous}\n\n` : ""}${parts.join("\n\n")}`);
-      toast.success("图片文字已在本机识别", { description: "请先核对下方文本与角色，再点击“归档记录”。" });
+      const text = parts.join("\n\n");
+      setImportText((previous) => `${previous ? `${previous}\n\n` : ""}${text}`);
+      setStagedMessages([]);
+      setImportReviewNote(`已按你选择图片的顺序读取 ${files.length} 张截图，识别出约 ${bubbleCount} 个消息片段${usedSideHints ? "；左右位置仅用于区分消息，不会猜测谁是“我”。" : "。"}`);
+      toast.success("图片已完成本机 OCR", { description: "请检查文本顺序后，点击“生成核对预览”。" });
     } catch (error) {
       toast.error("图片识别失败", { description: error instanceof Error ? error.message : "请改用清晰、完整的聊天截图或导入 TXT。" });
     } finally {
@@ -133,6 +171,14 @@ export default function Home() {
 
   const setRole = (speaker: string, role: SpeakerRole) => {
     setArchiveSafely((previous) => ({ ...previous, roles: { ...previous.roles, [speaker]: role } }));
+  };
+
+  const setStagedRole = (speaker: string, role: SpeakerRole) => {
+    setStagedRoles((previous) => ({ ...previous, [speaker]: role }));
+  };
+
+  const toggleStagedMessage = (id: string) => {
+    setStagedMessages((previous) => previous.map((message) => message.id === id ? { ...message, ignored: !message.ignored, filterReason: message.ignored ? undefined : message.filterReason || "手动过滤" } : message));
   };
 
   const updateProfile = (key: keyof ArchiveState["profile"], value: string) => {
@@ -358,9 +404,15 @@ export default function Home() {
 
         {screen === "corpus" && (
           <section className="corpus-layout">
-            <div className="paper-panel import-panel"><div className="panel-heading"><div><span className="panel-index">I-02</span><h2>导入聊天记录</h2></div><span className="source-note">TXT / 图片 / 粘贴</span></div><div className="import-workspace"><textarea value={importText} onChange={(event) => setImportText(event.target.value)} placeholder={`支持以下格式：\n[08:43] 我: 想你了\n[08:47] 小雨: 嘴真甜\n\n也可以导入 TXT 或聊天截图。图片会先在此浏览器 OCR 为文本，请核对后再归档。`} rows={12} /><div className="import-actions"><button className="primary-button" onClick={() => importRecords(importText)} disabled={!importText.trim() || imageImporting}><Archive size={17} /> 归档 {preview.length ? `${preview.length} 条预览` : "记录"}</button><button className="outline-button" onClick={() => importInput.current?.click()}><Paperclip size={17} /> 导入 TXT</button><button className="outline-button" onClick={() => imageImportInput.current?.click()} disabled={imageImporting}><ImagePlus size={17} /> {imageImporting ? `识别中 ${Math.round(ocrProgress * 100)}%` : "导入图片"}</button><button className="text-button" onClick={() => setImportText(sampleCorpus)}>载入虚构示例</button><input ref={importInput} onChange={handleTextFile} type="file" accept=".txt,text/plain" hidden /><input ref={imageImportInput} onChange={(event) => void handleImageFiles(event)} type="file" accept="image/png,image/jpeg,image/webp" multiple hidden /></div></div><div className="import-footnote"><ShieldCheck size={15} /> TXT 直接解析；图片先在当前浏览器本机 OCR，再由你核对文本后归档。系统只做初步角色建议，不会猜测性别、关系或不清晰图片中的内容。</div></div>
+            <div className="paper-panel import-panel">
+              <div className="panel-heading"><div><span className="panel-index">I-02</span><h2>导入聊天记录</h2></div><span className="source-note">先核对 · 后归档</span></div>
+              <div className="import-steps"><span className="is-current">01 读入</span><span className={stagedMessages.length ? "is-current" : ""}>02 核对</span><span className={stagedMessages.length ? "is-current" : ""}>03 归档</span></div>
+              <div className="import-workspace"><textarea value={importText} onChange={(event) => { setImportText(event.target.value); setStagedMessages([]); }} placeholder={`支持以下格式：\n[08:43] 我: 想你了\n[08:47] 小雨: 嘴真甜\n\n导入 TXT 或聊天截图后，请先生成核对预览。图片会按你选择文件的顺序 OCR；请按聊天先后顺序选择截图。`} rows={12} /><div className="import-actions"><button className="primary-button" onClick={() => prepareImport(importText)} disabled={!importText.trim() || imageImporting}><Archive size={17} /> 生成核对预览 {preview.length ? `${preview.length} 段` : ""}</button><button className="outline-button" onClick={() => importInput.current?.click()}><Paperclip size={17} /> 导入 TXT</button><button className="outline-button" onClick={() => imageImportInput.current?.click()} disabled={imageImporting}><ImagePlus size={17} /> {imageImporting ? `识别中 ${Math.round(ocrProgress * 100)}%` : "导入图片"}</button><button className="text-button" onClick={() => { setImportText(sampleCorpus); setStagedMessages([]); setImportReviewNote("已载入虚构示例，请生成核对预览。"); }}>载入虚构示例</button><input ref={importInput} onChange={handleTextFile} type="file" accept=".txt,text/plain" hidden /><input ref={imageImportInput} onChange={(event) => void handleImageFiles(event)} type="file" accept="image/png,image/jpeg,image/webp" multiple hidden /></div></div>
+              <div className="import-footnote"><ShieldCheck size={15} /> 不完整时间不会被系统臆测排序；只有每条都带完整日期和时间时才会按时间排序，否则严格保留 TXT 行序或你选择截图的顺序。系统提示、媒体占位符和交易提示默认过滤，但可在预览中重新纳入。</div>
+            </div>
             <aside className="import-aside"><img src={importArtUrl} alt="整理中的语料纸页" /><div><span className="rail-label">已归档</span><b>{archive.messages.length} 条</b><p>{speakers.length || 0} 位说话人 · {snapshot.activeDays || 0} 个日期</p></div></aside>
-            <div className="paper-panel role-panel"><div className="panel-heading"><div><span className="panel-index">R-03</span><h2>这个人是谁？</h2></div><span className="source-note">角色随时可改</span></div>{speakers.length ? <div className="speaker-table">{speakers.map((speaker, index) => { const currentRole = roleOf(speaker, archive.roles); return <div className="speaker-row" key={speaker}><span className="speaker-number">{String(index + 1).padStart(2, "0")}</span><div className="speaker-name"><b>{speaker}</b><small>{countForSpeaker(archive.messages, speaker)} 条记录</small></div><div className="role-options">{(["me", "ta", "ignore"] as SpeakerRole[]).map((role) => <button key={role} className={currentRole === role ? "selected" : ""} onClick={() => setRole(speaker, role)}>{roleLabel(role)}</button>)}</div></div>; })}</div> : <div className="empty-inline"><UserRound size={20} /><p>导入语料后，在这里指定“我”和“TA”。</p></div>}</div>
+            {stagedMessages.length > 0 && <div className="paper-panel import-review-panel"><div className="panel-heading"><div><span className="panel-index">R-03</span><h2>归档前核对</h2></div><span className="source-note">尚未写入档案</span></div><div className="import-review-summary"><b>已解析 {stagedMessages.length} 段，其中将归档 {stagedKept.length} 段</b><p>{importReviewNote}</p><small>{stagedMessages.every((message) => message.date !== "未标注日期" && Boolean(message.time)) ? "所有记录都有完整日期与时间，预览已按时间排序。" : "存在缺失日期或时间的记录，预览严格保留原始导入顺序。"}</small></div><div className="staged-speaker-map"><b>先确认说话人</b>{stagedSpeakers.map((speaker) => <div className="staged-speaker-row" key={speaker}><span>{speaker}</span><div>{(["me", "ta", "ignore"] as SpeakerRole[]).map((role) => <button key={role} className={stagedRoles[speaker] === role ? "selected" : ""} onClick={() => setStagedRole(speaker, role)}>{roleLabel(role)}</button>)}</div></div>)}</div><div className="staged-message-list">{stagedMessages.map((message, index) => { const filtered = Boolean(message.ignored) || stagedRoles[message.speaker] === "ignore"; return <div className={`staged-message ${filtered ? "is-filtered" : ""}`} key={message.id}><span className="staged-index">{String(index + 1).padStart(3, "0")}</span><div className="staged-meta"><b>{message.speaker}</b><small>{message.date}{message.time ? ` · ${message.time}` : " · 时间未识别"}</small></div><p>{message.text}</p><button className="text-button" onClick={() => toggleStagedMessage(message.id)}>{filtered ? "纳入" : "过滤"}</button>{message.filterReason && <small className="filter-reason">{message.filterReason}</small>}</div>; })}</div><div className="review-actions"><button className="primary-button" onClick={commitStagedRecords} disabled={!stagedKept.length}><Archive size={17} /> 确认归档 {stagedKept.length} 条</button><button className="outline-button" onClick={() => { setStagedMessages([]); setStagedRoles({}); setImportReviewNote(""); }}>返回编辑文本</button></div></div>}
+            <div className="paper-panel role-panel"><div className="panel-heading"><div><span className="panel-index">A-04</span><h2>已归档角色</h2></div><span className="source-note">随时可改</span></div>{speakers.length ? <div className="speaker-table">{speakers.map((speaker, index) => { const currentRole = roleOf(speaker, archive.roles); return <div className="speaker-row" key={speaker}><span className="speaker-number">{String(index + 1).padStart(2, "0")}</span><div className="speaker-name"><b>{speaker}</b><small>{countForSpeaker(archive.messages, speaker)} 条记录</small></div><div className="role-options">{(["me", "ta", "ignore"] as SpeakerRole[]).map((role) => <button key={role} className={currentRole === role ? "selected" : ""} onClick={() => setRole(speaker, role)}>{roleLabel(role)}</button>)}</div></div>; })}</div> : <div className="empty-inline"><UserRound size={20} /><p>核对并归档后，这里会保留最终角色映射。</p></div>}</div>
           </section>
         )}
 

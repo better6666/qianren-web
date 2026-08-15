@@ -3,12 +3,20 @@ import { recognize } from "tesseract.js";
 
 export type SpeakerRole = "me" | "ta" | "ignore";
 
+export type CorpusKind = "message" | "system" | "media" | "uncertain";
+
 export type CorpusMessage = {
   id: string;
   speaker: string;
   text: string;
   date: string;
   time: string;
+  /** 原始导入中的稳定行序；时间不完整时绝不据此臆测重排。 */
+  sourceIndex?: number;
+  kind?: CorpusKind;
+  /** 默认过滤的原因，用户可在归档前预览中重新纳入。 */
+  filterReason?: string;
+  ignored?: boolean;
 };
 
 export type ChatMessage = {
@@ -112,43 +120,125 @@ export function saveArchive(state: ArchiveState) {
 }
 
 function normalizedDate(value: string) {
-  const match = value.match(/(\d{4})[./-](\d{1,2})[./-](\d{1,2})/);
+  const match = value.match(/(\d{4})[./年-](\d{1,2})[./月-](\d{1,2})/);
   if (!match) return "未标注日期";
   return `${match[1]}-${match[2].padStart(2, "0")}-${match[3].padStart(2, "0")}`;
 }
 
-export function parseChatText(raw: string): CorpusMessage[] {
-  let currentDate = "未标注日期";
-  const parsed: CorpusMessage[] = [];
-
-  raw.replace(/\r/g, "").split("\n").forEach((sourceLine) => {
-    const line = sourceLine.trim();
-    if (!line) return;
-
-    const dateHeading = line.match(/[—–-]*\s*(\d{4}[./-]\d{1,2}[./-]\d{1,2})\s*[—–-]*/);
-    if (dateHeading && !line.match(/\[\d{1,2}:\d{2}/)) {
-      currentDate = normalizedDate(dateHeading[1]);
-      return;
-    }
-
-    const timed = line.match(/^\[(\d{1,2}:\d{2})(?::\d{2})?\]\s*([^:：]+)[:：]\s*(.+)$/);
-    const dated = line.match(/^(\d{4}[./-]\d{1,2}[./-]\d{1,2})\s+(\d{1,2}:\d{2})\s+([^:：]+)[:：]\s*(.+)$/);
-    const simple = line.match(/^([^:：]{1,24})[:：]\s*(.+)$/);
-
-    if (timed) {
-      parsed.push({ id: uid("corpus"), time: timed[1], speaker: timed[2].trim(), text: timed[3].trim(), date: currentDate });
-    } else if (dated) {
-      parsed.push({ id: uid("corpus"), time: dated[2], speaker: dated[3].trim(), text: dated[4].trim(), date: normalizedDate(dated[1]) });
-    } else if (simple) {
-      parsed.push({ id: uid("corpus"), time: "", speaker: simple[1].trim(), text: simple[2].trim(), date: currentDate });
-    }
-  });
-  return parsed;
+function normalizedTime(value: string) {
+  const match = value.match(/(\d{1,2}):(\d{2})(?::\d{2})?/);
+  return match ? `${match[1].padStart(2, "0")}:${match[2]}` : "";
 }
 
-export async function recognizeChatImage(file: File, onProgress?: (progress: number) => void) {
+const systemNoise = [
+  /撤回了一条消息/, /拍了拍/, /加入了群聊/, /退出了群聊/, /修改了群聊名称/,
+  /已添加.*为好友/, /你已添加/, /正在通话/, /通话时长/, /消息已发出，但被对方拒收/,
+];
+const mediaPlaceholder = /^\[?(图片|表情|动画表情|视频|语音|位置|文件|小程序|链接|名片|红包|转账|通话记录)[^\]]*\]?$/i;
+
+function classifyCorpusText(text: string): Pick<CorpusMessage, "kind" | "ignored" | "filterReason"> {
+  const compact = text.replace(/\s+/g, " ").trim();
+  if (systemNoise.some((pattern) => pattern.test(compact))) return { kind: "system", ignored: true, filterReason: "系统提示" };
+  if (mediaPlaceholder.test(compact)) return { kind: "media", ignored: true, filterReason: "媒体、附件或交易占位符" };
+  if (/^[—_·.。…\-\s]{3,}$/.test(compact)) return { kind: "uncertain", ignored: true, filterReason: "无可读文字" };
+  return { kind: "message", ignored: false };
+}
+
+function createParsedMessage(sourceIndex: number, speaker: string, text: string, date: string, time: string): CorpusMessage | null {
+  const cleaned = text.replace(/[\u200b\ufeff]/g, "").replace(/\s*\n\s*/g, " ").trim();
+  if (!cleaned) return null;
+  const classification = classifyCorpusText(cleaned);
+  return { id: `draft-${sourceIndex}`, sourceIndex, speaker: speaker.trim() || "待确认", text: cleaned, date, time, ...classification };
+}
+
+function timestampOf(message: CorpusMessage) {
+  if (!message.date || message.date === "未标注日期" || !message.time) return null;
+  const date = message.date.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  const time = message.time.match(/^(\d{2}):(\d{2})$/);
+  if (!date || !time) return null;
+  return Date.UTC(Number(date[1]), Number(date[2]) - 1, Number(date[3]), Number(time[1]), Number(time[2]));
+}
+
+/** 只有全部记录均带完整日期与时间时才重排；否则严格保留用户原始导入顺序。 */
+export function preserveChronologicalOrder(messages: CorpusMessage[]) {
+  const copied = [...messages];
+  if (copied.length < 2 || !copied.every((message) => timestampOf(message) !== null)) return copied.sort((a, b) => (a.sourceIndex ?? 0) - (b.sourceIndex ?? 0));
+  return copied.sort((a, b) => (timestampOf(a)! - timestampOf(b)!) || (a.sourceIndex ?? 0) - (b.sourceIndex ?? 0));
+}
+
+export function parseChatText(raw: string): CorpusMessage[] {
+  let currentDate = "未标注日期";
+  let pendingSpeaker = "";
+  let pendingTime = "";
+  let active: CorpusMessage | null = null;
+  let sourceIndex = 0;
+  const parsed: CorpusMessage[] = [];
+  const push = (speaker: string, text: string, date = currentDate, time = "") => {
+    const message = createParsedMessage(sourceIndex++, speaker, text, date, normalizedTime(time));
+    if (message) { parsed.push(message); active = message; }
+  };
+  const append = (text: string) => {
+    if (active && active.kind !== "system") {
+      active.text = `${active.text} ${text}`.replace(/\s+/g, " ").trim();
+      Object.assign(active, classifyCorpusText(active.text));
+    } else push(pendingSpeaker || "待确认", text, currentDate, pendingTime);
+  };
+
+  for (const sourceLine of raw.replace(/\r/g, "").split("\n")) {
+    const line = sourceLine.replace(/[\u200b\ufeff]/g, "").trim();
+    if (!line) continue;
+
+    const inlineDated = line.match(/^\[?(\d{4}[./年-]\d{1,2}[./月-]\d{1,2})\s+(\d{1,2}:\d{2}(?::\d{2})?)\]?\s+([^:：]{1,32})[:：]\s*(.*)$/);
+    const inlineTimed = line.match(/^\[(\d{1,2}:\d{2}(?::\d{2})?)\]\s*([^:：]{1,32})[:：]\s*(.*)$/);
+    const plainTimed = line.match(/^(\d{1,2}:\d{2}(?::\d{2})?)\s+([^:：]{1,32})[:：]\s*(.*)$/);
+    const simple = line.match(/^([^:：]{1,32})[:：]\s*(.+)$/);
+    const speakerHeader = line.match(/^([^:：]{1,32})\s+(?:\[?(\d{1,2}:\d{2}(?::\d{2})?)\]?)(?:\s|$)/);
+    const dateHeading = line.match(/^(?:[—–-]*\s*)?(\d{4}[./年-]\d{1,2}[./月-]\d{1,2})(?:日)?\s*(?:[—–-]*)$/);
+
+    if (inlineDated) {
+      currentDate = normalizedDate(inlineDated[1]); pendingSpeaker = ""; pendingTime = "";
+      push(inlineDated[3], inlineDated[4], currentDate, inlineDated[2]); continue;
+    }
+    if (inlineTimed) { push(inlineTimed[2], inlineTimed[3], currentDate, inlineTimed[1]); pendingSpeaker = ""; pendingTime = ""; continue; }
+    if (plainTimed) { push(plainTimed[2], plainTimed[3], currentDate, plainTimed[1]); pendingSpeaker = ""; pendingTime = ""; continue; }
+    if (dateHeading) { currentDate = normalizedDate(dateHeading[1]); pendingTime = ""; active = null; continue; }
+    if (speakerHeader && !simple) { pendingSpeaker = speakerHeader[1].trim(); pendingTime = normalizedTime(speakerHeader[2]); active = null; continue; }
+    if (simple) { push(simple[1], simple[2], currentDate, pendingTime); pendingSpeaker = ""; pendingTime = ""; continue; }
+    if (systemNoise.some((pattern) => pattern.test(line))) { push("系统提示", line, currentDate, pendingTime); pendingSpeaker = ""; pendingTime = ""; continue; }
+    append(line); pendingSpeaker = ""; pendingTime = "";
+  }
+  return preserveChronologicalOrder(parsed);
+}
+
+export type ImageOcrResult = { rawText: string; formattedText: string; detectedBubbles: number; usedSideHints: boolean };
+
+/** OCR 先按截图纵向顺序读取；仅用左右位置标记“左/右侧消息”，绝不猜测哪一侧是我。 */
+export async function recognizeChatImage(file: File, onProgress?: (progress: number) => void): Promise<ImageOcrResult> {
   const result = await recognize(file, "chi_sim+eng", { logger: (message) => { if (message.status === "recognizing text" && typeof message.progress === "number") onProgress?.(message.progress); } });
-  return result.data.text.replace(/\r/g, "").replace(/[\u200b\ufeff]/g, "").trim();
+  const rawText = result.data.text.replace(/\r/g, "").replace(/[\u200b\ufeff]/g, "").trim();
+  type OcrLine = { text?: string; bbox?: { x0?: number; x1?: number; y0?: number; y1?: number } };
+  const lines = ((result.data as unknown as { lines?: OcrLine[] }).lines ?? [])
+    .map((line) => ({ text: line.text?.replace(/\s+/g, " ").trim() || "", x0: line.bbox?.x0 ?? 0, x1: line.bbox?.x1 ?? 0, y0: line.bbox?.y0 ?? 0, y1: line.bbox?.y1 ?? 0 }))
+    .filter((line) => line.text)
+    .sort((a, b) => a.y0 - b.y0 || a.x0 - b.x0);
+  if (!lines.length) return { rawText, formattedText: rawText, detectedBubbles: 0, usedSideHints: false };
+
+  const width = Math.max(...lines.map((line) => line.x1), 1);
+  const bubbles: Array<{ speaker: string; text: string; time: string; y1: number }> = [];
+  let pendingTime = "";
+  for (const line of lines) {
+    const centered = (line.x0 + line.x1) / 2;
+    const timeOnly = normalizedTime(line.text);
+    if (timeOnly && line.text.replace(/\s/g, "").length <= 8 && centered > width * 0.28 && centered < width * 0.72) { pendingTime = timeOnly; continue; }
+    const speaker = centered >= width * 0.55 ? "右侧消息" : "左侧消息";
+    const previous = bubbles[bubbles.length - 1];
+    const sameBubble = previous && previous.speaker === speaker && line.y0 - previous.y1 < 54;
+    if (sameBubble) { previous.text = `${previous.text} ${line.text}`.trim(); previous.y1 = line.y1; }
+    else bubbles.push({ speaker, text: line.text, time: pendingTime, y1: line.y1 });
+    pendingTime = "";
+  }
+  const formattedText = bubbles.map((bubble) => `${bubble.time ? `[${bubble.time}] ` : ""}${bubble.speaker}: ${bubble.text}`).join("\n");
+  return { rawText, formattedText: formattedText || rawText, detectedBubbles: bubbles.length, usedSideHints: bubbles.length > 0 };
 }
 
 export type RoleSuggestion = { roles: Record<string, SpeakerRole>; meSpeaker?: string; taSpeaker?: string; confidence: "high" | "medium" | "low"; note: string };
@@ -160,14 +250,14 @@ export function inferRoles(messages: CorpusMessage[], profile: Partial<PortraitP
   const normalize = (value: string) => value.trim().toLowerCase();
   const explicitMe = speakers.find((speaker) => /^(我|me|自己|本人|我自己)$/i.test(speaker) || (profile.userName && normalize(speaker) === normalize(profile.userName)));
   const explicitTa = speakers.find((speaker) => (profile.targetName && normalize(speaker) === normalize(profile.targetName)) || /^(ta|对方|前任|对象|男朋友|女朋友|老公|老婆)$/i.test(speaker));
-  const ordered = [...speakers].sort((left, right) => (counts.get(right) || 0) - (counts.get(left) || 0));
-  const meSpeaker = explicitMe || (speakers.length === 2 ? ordered[0] : undefined);
-  const taSpeaker = explicitTa || (speakers.length === 2 ? ordered.find((speaker) => speaker !== meSpeaker) : undefined);
+  const otherSpeaker = speakers.length === 2 ? speakers.find((speaker) => speaker !== (explicitMe || explicitTa)) : undefined;
+  const meSpeaker = explicitMe || (explicitTa ? otherSpeaker : undefined);
+  const taSpeaker = explicitTa || (explicitMe ? otherSpeaker : undefined);
   const roles: Record<string, SpeakerRole> = {};
   if (meSpeaker) roles[meSpeaker] = "me";
   if (taSpeaker) roles[taSpeaker] = "ta";
-  if (meSpeaker && taSpeaker) return { roles, meSpeaker, taSpeaker, confidence: explicitMe || explicitTa ? "high" : "medium", note: explicitMe || explicitTa ? "已按称呼或已填写资料识别，请核对。" : "根据两位说话人的记录量进行了初步分配，请务必核对。" };
-  return { roles, meSpeaker, taSpeaker, confidence: "low", note: "无法可靠判断“我”和对方；请在角色列表中手动选择。" };
+  if (meSpeaker && taSpeaker) return { roles, meSpeaker, taSpeaker, confidence: "high", note: "已根据你填写的称呼或明确“我/TA”标记识别，请核对后归档。" };
+  return { roles, meSpeaker, taSpeaker, confidence: "low", note: "已识别说话人，但不会按消息数量猜测谁是“我”或“TA”；请在归档前手动确认。" };
 }
 
 export function mergeMessages(current: CorpusMessage[], incoming: CorpusMessage[]) {
@@ -178,7 +268,7 @@ export function mergeMessages(current: CorpusMessage[], incoming: CorpusMessage[
     existing.add(signature);
     return true;
   });
-  return { all: [...current, ...unique], added: unique.length, duplicate: incoming.length - unique.length };
+  return { all: preserveChronologicalOrder([...current, ...unique]), added: unique.length, duplicate: incoming.length - unique.length };
 }
 
 export function speakersFor(messages: CorpusMessage[]) {
@@ -187,7 +277,7 @@ export function speakersFor(messages: CorpusMessage[]) {
 
 export function roleOf(speaker: string, roles: Record<string, SpeakerRole>): SpeakerRole {
   if (roles[speaker]) return roles[speaker];
-  return /^(我|me|自己|本人)$/i.test(speaker) ? "me" : "ta";
+  return /^(我|me|自己|本人)$/i.test(speaker) ? "me" : "ignore";
 }
 
 export function messagesForRole(messages: CorpusMessage[], roles: Record<string, SpeakerRole>, role: SpeakerRole) {
