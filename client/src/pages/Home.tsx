@@ -36,10 +36,6 @@ function makeSession(): ChatSession {
   return { id: uid("session"), name: "新对话", createdAt: Date.now(), messages: [] };
 }
 
-function roleLabel(role: SpeakerRole) {
-  return role === "me" ? "我" : role === "ta" ? "TA" : "忽略";
-}
-
 function countForSpeaker(messages: CorpusMessage[], speaker: string) {
   return messages.filter((item) => item.speaker === speaker).length;
 }
@@ -81,7 +77,7 @@ export default function Home() {
   const speakers = useMemo(() => speakersFor(archive.messages), [archive.messages]);
   const preview = useMemo(() => stagedMessages.length ? stagedMessages : parseChatText(importText), [importText, stagedMessages]);
   const stagedSpeakers = useMemo(() => speakersFor(stagedMessages), [stagedMessages]);
-  const stagedKept = useMemo(() => stagedMessages.filter((message) => !message.ignored && (stagedRoles[message.speaker] === "me" || stagedRoles[message.speaker] === "ta")), [stagedMessages, stagedRoles]);
+  const stagedKept = useMemo(() => stagedMessages.filter((message) => !message.ignored && (Boolean(message.event) || stagedRoles[message.speaker] === "me" || stagedRoles[message.speaker] === "ta")), [stagedMessages, stagedRoles]);
   const activeSession = archive.sessions.find((item) => item.id === archive.activeSessionId) ?? archive.sessions[0] ?? null;
   const integratedPortrait = useMemo(() => createIntegratedPortrait(archive), [archive]);
   const currentMeta = screenMeta[screen];
@@ -98,18 +94,17 @@ export default function Home() {
     setStagedMessages(incoming);
     setStagedRoles(suggestion.roles);
     setImportReviewNote(`${sourceLabel} 已解析 ${incoming.length} 段。${suggestion.note}`);
-    toast.success("已生成归档前预览", { description: "请确认谁是“我”、谁是“TA”，并检查灰色的默认过滤内容。" });
+    toast.success("已自动还原互动时间线", { description: "系统已从名称、截图位置与上下文自动识别双方；转账、语音、表情和通话等事件会完整保留。" });
   };
 
   const commitStagedRecords = () => {
-    const meSpeakers = stagedSpeakers.filter((speaker) => stagedRoles[speaker] === "me");
     const taSpeakers = stagedSpeakers.filter((speaker) => stagedRoles[speaker] === "ta");
-    if (!meSpeakers.length || !taSpeakers.length) {
-      toast.error("请先确认双方角色", { description: "归档前至少指定一位“我”和一位“TA”；不确定或无关内容可标记为“忽略”。" });
+    if (!taSpeakers.length) {
+      toast.error("暂未识别到对方发言", { description: "系统没有从当前记录中找到可归入对方的内容。请补充更完整的聊天片段或连续截图后重试。" });
       return;
     }
     if (!stagedKept.length) {
-      toast.error("没有可归档的有效对话", { description: "请至少保留一段真实消息，并为其指定“我”或“TA”。" });
+      toast.error("没有可归档的有效互动", { description: "请至少保留一段文字消息或真实互动事件。" });
       return;
     }
     const incoming = stagedKept.map((message) => ({ ...message, id: uid("corpus"), ignored: false }));
@@ -159,7 +154,7 @@ export default function Home() {
       const text = parts.join("\n\n");
       setImportText((previous) => `${previous ? `${previous}\n\n` : ""}${text}`);
       setStagedMessages([]);
-      setImportReviewNote(`已按你选择图片的顺序读取 ${files.length} 张截图，识别出约 ${bubbleCount} 个消息片段${usedSideHints ? "；左右位置仅用于区分消息，不会猜测谁是“我”。" : "。"}`);
+      setImportReviewNote(`已按你选择图片的顺序读取 ${files.length} 张截图，识别出约 ${bubbleCount} 个消息片段${usedSideHints ? "；系统会结合左右位置与聊天上下文自动归因。" : "。"}`);
       toast.success("图片已完成本机 OCR", { description: "请检查文本顺序后，点击“生成核对预览”。" });
     } catch (error) {
       toast.error("图片识别失败", { description: error instanceof Error ? error.message : "请改用清晰、完整的聊天截图或导入 TXT。" });
@@ -167,14 +162,6 @@ export default function Home() {
       setImageImporting(false);
       setOcrProgress(0);
     }
-  };
-
-  const setRole = (speaker: string, role: SpeakerRole) => {
-    setArchiveSafely((previous) => ({ ...previous, roles: { ...previous.roles, [speaker]: role } }));
-  };
-
-  const setStagedRole = (speaker: string, role: SpeakerRole) => {
-    setStagedRoles((previous) => ({ ...previous, [speaker]: role }));
   };
 
   const toggleStagedMessage = (id: string) => {
@@ -408,11 +395,11 @@ export default function Home() {
               <div className="panel-heading"><div><span className="panel-index">I-02</span><h2>导入聊天记录</h2></div><span className="source-note">先核对 · 后归档</span></div>
               <div className="import-steps"><span className="is-current">01 读入</span><span className={stagedMessages.length ? "is-current" : ""}>02 核对</span><span className={stagedMessages.length ? "is-current" : ""}>03 归档</span></div>
               <div className="import-workspace"><textarea value={importText} onChange={(event) => { setImportText(event.target.value); setStagedMessages([]); }} placeholder={`支持以下格式：\n[08:43] 我: 想你了\n[08:47] 小雨: 嘴真甜\n\n导入 TXT 或聊天截图后，请先生成核对预览。图片会按你选择文件的顺序 OCR；请按聊天先后顺序选择截图。`} rows={12} /><div className="import-actions"><button className="primary-button" onClick={() => prepareImport(importText)} disabled={!importText.trim() || imageImporting}><Archive size={17} /> 生成核对预览 {preview.length ? `${preview.length} 段` : ""}</button><button className="outline-button" onClick={() => importInput.current?.click()}><Paperclip size={17} /> 导入 TXT</button><button className="outline-button" onClick={() => imageImportInput.current?.click()} disabled={imageImporting}><ImagePlus size={17} /> {imageImporting ? `识别中 ${Math.round(ocrProgress * 100)}%` : "导入图片"}</button><button className="text-button" onClick={() => { setImportText(sampleCorpus); setStagedMessages([]); setImportReviewNote("已载入虚构示例，请生成核对预览。"); }}>载入虚构示例</button><input ref={importInput} onChange={handleTextFile} type="file" accept=".txt,text/plain" hidden /><input ref={imageImportInput} onChange={(event) => void handleImageFiles(event)} type="file" accept="image/png,image/jpeg,image/webp" multiple hidden /></div></div>
-              <div className="import-footnote"><ShieldCheck size={15} /> 不完整时间不会被系统臆测排序；只有每条都带完整日期和时间时才会按时间排序，否则严格保留 TXT 行序或你选择截图的顺序。系统提示、媒体占位符和交易提示默认过滤，但可在预览中重新纳入。</div>
+              <div className="import-footnote"><ShieldCheck size={15} /> 不完整时间不会被系统臆测排序；只有每条都带完整日期和时间时才会按时间排序，否则严格保留 TXT 行序或你选择截图的顺序。转账、红包、语音、表情、图片、视频与通话都会保留为互动事件，并进入时间线。</div>
             </div>
             <aside className="import-aside"><img src={importArtUrl} alt="整理中的语料纸页" /><div><span className="rail-label">已归档</span><b>{archive.messages.length} 条</b><p>{speakers.length || 0} 位说话人 · {snapshot.activeDays || 0} 个日期</p></div></aside>
-            {stagedMessages.length > 0 && <div className="paper-panel import-review-panel"><div className="panel-heading"><div><span className="panel-index">R-03</span><h2>归档前核对</h2></div><span className="source-note">尚未写入档案</span></div><div className="import-review-summary"><b>已解析 {stagedMessages.length} 段，其中将归档 {stagedKept.length} 段</b><p>{importReviewNote}</p><small>{stagedMessages.every((message) => message.date !== "未标注日期" && Boolean(message.time)) ? "所有记录都有完整日期与时间，预览已按时间排序。" : "存在缺失日期或时间的记录，预览严格保留原始导入顺序。"}</small></div><div className="staged-speaker-map"><b>先确认说话人</b>{stagedSpeakers.map((speaker) => <div className="staged-speaker-row" key={speaker}><span>{speaker}</span><div>{(["me", "ta", "ignore"] as SpeakerRole[]).map((role) => <button key={role} className={stagedRoles[speaker] === role ? "selected" : ""} onClick={() => setStagedRole(speaker, role)}>{roleLabel(role)}</button>)}</div></div>)}</div><div className="staged-message-list">{stagedMessages.map((message, index) => { const filtered = Boolean(message.ignored) || stagedRoles[message.speaker] === "ignore"; return <div className={`staged-message ${filtered ? "is-filtered" : ""}`} key={message.id}><span className="staged-index">{String(index + 1).padStart(3, "0")}</span><div className="staged-meta"><b>{message.speaker}</b><small>{message.date}{message.time ? ` · ${message.time}` : " · 时间未识别"}</small></div><p>{message.text}</p><button className="text-button" onClick={() => toggleStagedMessage(message.id)}>{filtered ? "纳入" : "过滤"}</button>{message.filterReason && <small className="filter-reason">{message.filterReason}</small>}</div>; })}</div><div className="review-actions"><button className="primary-button" onClick={commitStagedRecords} disabled={!stagedKept.length}><Archive size={17} /> 确认归档 {stagedKept.length} 条</button><button className="outline-button" onClick={() => { setStagedMessages([]); setStagedRoles({}); setImportReviewNote(""); }}>返回编辑文本</button></div></div>}
-            <div className="paper-panel role-panel"><div className="panel-heading"><div><span className="panel-index">A-04</span><h2>已归档角色</h2></div><span className="source-note">随时可改</span></div>{speakers.length ? <div className="speaker-table">{speakers.map((speaker, index) => { const currentRole = roleOf(speaker, archive.roles); return <div className="speaker-row" key={speaker}><span className="speaker-number">{String(index + 1).padStart(2, "0")}</span><div className="speaker-name"><b>{speaker}</b><small>{countForSpeaker(archive.messages, speaker)} 条记录</small></div><div className="role-options">{(["me", "ta", "ignore"] as SpeakerRole[]).map((role) => <button key={role} className={currentRole === role ? "selected" : ""} onClick={() => setRole(speaker, role)}>{roleLabel(role)}</button>)}</div></div>; })}</div> : <div className="empty-inline"><UserRound size={20} /><p>核对并归档后，这里会保留最终角色映射。</p></div>}</div>
+            {stagedMessages.length > 0 && <div className="paper-panel import-review-panel"><div className="panel-heading"><div><span className="panel-index">R-03</span><h2>归档前核对</h2></div><span className="source-note">尚未写入档案</span></div><div className="import-review-summary"><b>已解析 {stagedMessages.length} 段，其中将归档 {stagedKept.length} 段</b><p>{importReviewNote}</p><small>{stagedMessages.every((message) => message.date !== "未标注日期" && Boolean(message.time)) ? "所有记录都有完整日期与时间，预览已按时间排序。" : "存在缺失日期或时间的记录，预览严格保留原始导入顺序。"}</small></div><div className="staged-speaker-map"><b>系统自动识别</b>{stagedSpeakers.map((speaker) => <div className="staged-speaker-row" key={speaker}><span>{speaker}</span><div><small className={`role-badge role-${stagedRoles[speaker] || "ignore"}`}>{stagedRoles[speaker] === "me" ? "自动识别为：我" : stagedRoles[speaker] === "ta" ? "自动识别为：TA" : speaker === "互动事件" ? "按时间线保留" : "旁观或无法归因"}</small></div></div>)}</div><div className="staged-message-list">{stagedMessages.map((message, index) => { const filtered = Boolean(message.ignored) || (!message.event && stagedRoles[message.speaker] === "ignore"); return <div className={`staged-message ${filtered ? "is-filtered" : ""}`} key={message.id}><span className="staged-index">{String(index + 1).padStart(3, "0")}</span><div className="staged-meta"><b>{message.speaker}</b><small>{message.date}{message.time ? ` · ${message.time}` : " · 时间未识别"}</small></div><p>{message.text}</p><button className="text-button" onClick={() => toggleStagedMessage(message.id)}>{filtered ? "保留" : "隐藏"}</button>{message.event && <small className={`event-tag event-${message.event.kind}`}>{message.event.kind === "transfer" ? "转账" : message.event.kind === "red-packet" ? "红包" : message.event.kind === "voice" ? "语音" : message.event.kind === "video" ? "视频" : message.event.kind === "call" ? "通话" : message.event.kind === "sticker" ? "表情" : message.event.kind === "image" ? "图片" : message.event.kind === "location" ? "位置" : message.event.kind === "file" ? "文件" : message.event.kind === "link" ? "链接" : "互动事件"}</small>}{message.filterReason && <small className="filter-reason">{message.filterReason}</small>}</div>; })}</div><div className="review-actions"><button className="primary-button" onClick={commitStagedRecords} disabled={!stagedKept.length}><Archive size={17} /> 确认归档 {stagedKept.length} 条</button><button className="outline-button" onClick={() => { setStagedMessages([]); setStagedRoles({}); setImportReviewNote(""); }}>返回编辑文本</button></div></div>}
+            <div className="paper-panel role-panel"><div className="panel-heading"><div><span className="panel-index">A-04</span><h2>自动角色结果</h2></div><span className="source-note">基于导入上下文</span></div>{speakers.length ? <div className="speaker-table">{speakers.map((speaker, index) => { const currentRole = roleOf(speaker, archive.roles); return <div className="speaker-row" key={speaker}><span className="speaker-number">{String(index + 1).padStart(2, "0")}</span><div className="speaker-name"><b>{speaker}</b><small>{countForSpeaker(archive.messages, speaker)} 条记录</small></div><small className={`role-badge role-${currentRole}`}>{currentRole === "me" ? "系统识别：我" : currentRole === "ta" ? "系统识别：TA" : speaker === "互动事件" ? "互动事件时间线" : "旁观或无法归因"}</small></div>; })}</div> : <div className="empty-inline"><UserRound size={20} /><p>归档后，系统会在这里展示自动还原出的双方角色与事件时间线。</p></div>}</div>
           </section>
         )}
 

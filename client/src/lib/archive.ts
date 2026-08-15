@@ -3,7 +3,8 @@ import { recognize } from "tesseract.js";
 
 export type SpeakerRole = "me" | "ta" | "ignore";
 
-export type CorpusKind = "message" | "system" | "media" | "uncertain";
+export type CorpusKind = "message" | "system" | "image" | "sticker" | "voice" | "video" | "call" | "transfer" | "red-packet" | "file" | "location" | "link" | "uncertain";
+export type InteractionEvent = { kind: CorpusKind; actor?: string; target?: string; description: string };
 
 export type CorpusMessage = {
   id: string;
@@ -14,7 +15,9 @@ export type CorpusMessage = {
   /** 原始导入中的稳定行序；时间不完整时绝不据此臆测重排。 */
   sourceIndex?: number;
   kind?: CorpusKind;
-  /** 默认过滤的原因，用户可在归档前预览中重新纳入。 */
+  /** 互动事件会保留原始文字，并尽可能标出发起者、接收者或状态。 */
+  event?: InteractionEvent;
+  /** 用户主动隐藏的项目；自动解析不会删除任何事件。 */
   filterReason?: string;
   ignored?: boolean;
 };
@@ -130,25 +133,54 @@ function normalizedTime(value: string) {
   return match ? `${match[1].padStart(2, "0")}:${match[2]}` : "";
 }
 
-const systemNoise = [
+const systemEvents = [
   /撤回了一条消息/, /拍了拍/, /加入了群聊/, /退出了群聊/, /修改了群聊名称/,
-  /已添加.*为好友/, /你已添加/, /正在通话/, /通话时长/, /消息已发出，但被对方拒收/,
+  /已添加.*为好友/, /你已添加/, /消息已发出，但被对方拒收/,
 ];
-const mediaPlaceholder = /^\[?(图片|表情|动画表情|视频|语音|位置|文件|小程序|链接|名片|红包|转账|通话记录)[^\]]*\]?$/i;
 
-function classifyCorpusText(text: string): Pick<CorpusMessage, "kind" | "ignored" | "filterReason"> {
+function eventKindFor(text: string): CorpusKind | null {
+  const value = text.replace(/\s+/g, " ").trim();
+  if (/转账|收款|¥|￥/.test(value)) return "transfer";
+  if (/红包/.test(value)) return "red-packet";
+  if (/通话|电话|语音聊天/.test(value)) return "call";
+  if (/视频/.test(value)) return "video";
+  if (/语音/.test(value)) return "voice";
+  if (/动画表情|表情/.test(value)) return "sticker";
+  if (/图片|照片|相册/.test(value)) return "image";
+  if (/位置/.test(value)) return "location";
+  if (/文件|文档/.test(value)) return "file";
+  if (/链接|小程序|名片/.test(value)) return "link";
+  if (systemEvents.some((pattern) => pattern.test(value))) return "system";
+  return null;
+}
+
+function eventActors(text: string, fallbackActor: string) {
+  const directed = text.match(/^(.{1,32}?)(?:向|给)(.{1,32}?)(?:转账|发起转账|发送了红包|发起了语音通话|发起了视频通话)/);
+  if (directed) return { actor: directed[1].trim(), target: directed[2].trim() };
+  const received = text.match(/^(?:你|我)收到(.{1,32}?)的(?:转账|红包)/);
+  if (received) return { actor: received[1].trim(), target: fallbackActor };
+  return fallbackActor && fallbackActor !== "互动事件" ? { actor: fallbackActor } : {};
+}
+
+function eventActorFromText(text: string) {
+  const match = text.match(/^(.{1,32}?)(?:向|给|发起(?:了)?|发送(?:了)?|分享(?:了)?)(?:.{0,32})(?:转账|红包|语音|视频|通话|电话|图片|表情|文件|位置|链接)/);
+  return match?.[1].trim();
+}
+
+function classifyCorpusText(text: string, speaker: string): Pick<CorpusMessage, "kind" | "event" | "ignored" | "filterReason"> {
   const compact = text.replace(/\s+/g, " ").trim();
-  if (systemNoise.some((pattern) => pattern.test(compact))) return { kind: "system", ignored: true, filterReason: "系统提示" };
-  if (mediaPlaceholder.test(compact)) return { kind: "media", ignored: true, filterReason: "媒体、附件或交易占位符" };
-  if (/^[—_·.。…\-\s]{3,}$/.test(compact)) return { kind: "uncertain", ignored: true, filterReason: "无可读文字" };
+  const kind = eventKindFor(compact);
+  if (kind) return { kind, event: { kind, ...eventActors(compact, speaker), description: compact }, ignored: false };
+  if (/^[—_·.。…\-\s]{3,}$/.test(compact)) return { kind: "uncertain", ignored: true, filterReason: "没有可辨识内容" };
   return { kind: "message", ignored: false };
 }
 
 function createParsedMessage(sourceIndex: number, speaker: string, text: string, date: string, time: string): CorpusMessage | null {
   const cleaned = text.replace(/[\u200b\ufeff]/g, "").replace(/\s*\n\s*/g, " ").trim();
   if (!cleaned) return null;
-  const classification = classifyCorpusText(cleaned);
-  return { id: `draft-${sourceIndex}`, sourceIndex, speaker: speaker.trim() || "待确认", text: cleaned, date, time, ...classification };
+  const normalizedSpeaker = speaker.trim() || "互动事件";
+  const classification = classifyCorpusText(cleaned, normalizedSpeaker);
+  return { id: `draft-${sourceIndex}`, sourceIndex, speaker: normalizedSpeaker, text: cleaned, date, time, ...classification };
 }
 
 function timestampOf(message: CorpusMessage) {
@@ -180,7 +212,7 @@ export function parseChatText(raw: string): CorpusMessage[] {
   const append = (text: string) => {
     if (active && active.kind !== "system") {
       active.text = `${active.text} ${text}`.replace(/\s+/g, " ").trim();
-      Object.assign(active, classifyCorpusText(active.text));
+      Object.assign(active, classifyCorpusText(active.text, active.speaker));
     } else push(pendingSpeaker || "待确认", text, currentDate, pendingTime);
   };
 
@@ -189,6 +221,7 @@ export function parseChatText(raw: string): CorpusMessage[] {
     if (!line) continue;
 
     const inlineDated = line.match(/^\[?(\d{4}[./年-]\d{1,2}[./月-]\d{1,2})\s+(\d{1,2}:\d{2}(?::\d{2})?)\]?\s+([^:：]{1,32})[:：]\s*(.*)$/);
+    const timedEvent = line.match(/^\[(\d{1,2}:\d{2}(?::\d{2})?)\]\s*(.+)$/);
     const inlineTimed = line.match(/^\[(\d{1,2}:\d{2}(?::\d{2})?)\]\s*([^:：]{1,32})[:：]\s*(.*)$/);
     const plainTimed = line.match(/^(\d{1,2}:\d{2}(?::\d{2})?)\s+([^:：]{1,32})[:：]\s*(.*)$/);
     const simple = line.match(/^([^:：]{1,32})[:：]\s*(.+)$/);
@@ -199,12 +232,13 @@ export function parseChatText(raw: string): CorpusMessage[] {
       currentDate = normalizedDate(inlineDated[1]); pendingSpeaker = ""; pendingTime = "";
       push(inlineDated[3], inlineDated[4], currentDate, inlineDated[2]); continue;
     }
+    if (timedEvent && eventKindFor(timedEvent[2]) && !inlineTimed) { push(eventActorFromText(timedEvent[2]) || "互动事件", timedEvent[2], currentDate, timedEvent[1]); pendingSpeaker = ""; pendingTime = ""; continue; }
     if (inlineTimed) { push(inlineTimed[2], inlineTimed[3], currentDate, inlineTimed[1]); pendingSpeaker = ""; pendingTime = ""; continue; }
     if (plainTimed) { push(plainTimed[2], plainTimed[3], currentDate, plainTimed[1]); pendingSpeaker = ""; pendingTime = ""; continue; }
     if (dateHeading) { currentDate = normalizedDate(dateHeading[1]); pendingTime = ""; active = null; continue; }
     if (speakerHeader && !simple) { pendingSpeaker = speakerHeader[1].trim(); pendingTime = normalizedTime(speakerHeader[2]); active = null; continue; }
     if (simple) { push(simple[1], simple[2], currentDate, pendingTime); pendingSpeaker = ""; pendingTime = ""; continue; }
-    if (systemNoise.some((pattern) => pattern.test(line))) { push("系统提示", line, currentDate, pendingTime); pendingSpeaker = ""; pendingTime = ""; continue; }
+    if (eventKindFor(line)) { push("互动事件", line, currentDate, pendingTime); pendingSpeaker = ""; pendingTime = ""; continue; }
     append(line); pendingSpeaker = ""; pendingTime = "";
   }
   return preserveChronologicalOrder(parsed);
@@ -244,20 +278,27 @@ export async function recognizeChatImage(file: File, onProgress?: (progress: num
 export type RoleSuggestion = { roles: Record<string, SpeakerRole>; meSpeaker?: string; taSpeaker?: string; confidence: "high" | "medium" | "low"; note: string };
 
 export function inferRoles(messages: CorpusMessage[], profile: Partial<PortraitProfile> = {}): RoleSuggestion {
-  const speakers = speakersFor(messages);
-  if (!speakers.length) return { roles: {}, confidence: "low", note: "没有可供识别的说话人。" };
-  const counts = new Map(speakers.map((speaker) => [speaker, messages.filter((item) => item.speaker === speaker).length]));
+  const speakers = speakersFor(messages).filter((speaker) => speaker !== "互动事件" && speaker !== "系统提示");
+  if (!speakers.length) return { roles: { "互动事件": "ignore" }, confidence: "low", note: "没有可供识别的文字发言人；互动事件会随时间线保留。" };
   const normalize = (value: string) => value.trim().toLowerCase();
+  const firstIndex = new Map(speakers.map((speaker) => [speaker, messages.findIndex((message) => message.speaker === speaker)]));
   const explicitMe = speakers.find((speaker) => /^(我|me|自己|本人|我自己)$/i.test(speaker) || (profile.userName && normalize(speaker) === normalize(profile.userName)));
   const explicitTa = speakers.find((speaker) => (profile.targetName && normalize(speaker) === normalize(profile.targetName)) || /^(ta|对方|前任|对象|男朋友|女朋友|老公|老婆)$/i.test(speaker));
-  const otherSpeaker = speakers.length === 2 ? speakers.find((speaker) => speaker !== (explicitMe || explicitTa)) : undefined;
-  const meSpeaker = explicitMe || (explicitTa ? otherSpeaker : undefined);
-  const taSpeaker = explicitTa || (explicitMe ? otherSpeaker : undefined);
-  const roles: Record<string, SpeakerRole> = {};
-  if (meSpeaker) roles[meSpeaker] = "me";
-  if (taSpeaker) roles[taSpeaker] = "ta";
-  if (meSpeaker && taSpeaker) return { roles, meSpeaker, taSpeaker, confidence: "high", note: "已根据你填写的称呼或明确“我/TA”标记识别，请核对后归档。" };
-  return { roles, meSpeaker, taSpeaker, confidence: "low", note: "已识别说话人，但不会按消息数量猜测谁是“我”或“TA”；请在归档前手动确认。" };
+  const rightSide = speakers.find((speaker) => /^(右侧消息|右边消息|right)$/i.test(speaker));
+  const leftSide = speakers.find((speaker) => /^(左侧消息|左边消息|left)$/i.test(speaker));
+  const ordered = [...speakers].sort((left, right) => (firstIndex.get(left) ?? 0) - (firstIndex.get(right) ?? 0));
+  let meSpeaker = explicitMe || rightSide;
+  let taSpeaker = explicitTa || leftSide;
+  if (speakers.length === 2) {
+    if (!meSpeaker && taSpeaker) meSpeaker = speakers.find((speaker) => speaker !== taSpeaker);
+    if (!taSpeaker && meSpeaker) taSpeaker = speakers.find((speaker) => speaker !== meSpeaker);
+    if (!meSpeaker && !taSpeaker) { meSpeaker = ordered[0]; taSpeaker = ordered[1]; }
+  }
+  const roles: Record<string, SpeakerRole> = { "互动事件": "ignore", "系统提示": "ignore" };
+  speakers.forEach((speaker) => { roles[speaker] = speaker === meSpeaker ? "me" : speaker === taSpeaker ? "ta" : "ignore"; });
+  const confidence: RoleSuggestion["confidence"] = explicitMe || explicitTa ? "high" : rightSide || leftSide ? "medium" : speakers.length === 2 ? "low" : "low";
+  const reason = explicitMe || explicitTa ? "发言人名称与明确称呼或已填资料匹配" : rightSide || leftSide ? "根据聊天截图的左右消息位置自动归因" : speakers.length === 2 ? "未出现明确称呼，按最早出现的两位主要发言人自动映射" : "存在多位发言人，仅保留最可能的双人对话，其余标为旁观信息";
+  return { roles, meSpeaker, taSpeaker, confidence, note: `已自动识别：${meSpeaker || "未确定"} → 我，${taSpeaker || "未确定"} → TA（${reason}）。` };
 }
 
 export function mergeMessages(current: CorpusMessage[], incoming: CorpusMessage[]) {
@@ -284,13 +325,24 @@ export function messagesForRole(messages: CorpusMessage[], roles: Record<string,
   return messages.filter((item) => roleOf(item.speaker, roles) === role);
 }
 
+const eventNames: Partial<Record<CorpusKind, string>> = { transfer: "转账", "red-packet": "红包", voice: "语音", video: "视频", call: "通话", sticker: "表情", image: "图片", location: "位置", file: "文件", link: "链接", system: "系统互动" };
+
+export function summarizeInteractionEvents(messages: CorpusMessage[]) {
+  const events = preserveChronologicalOrder(messages.filter((message) => Boolean(message.event)));
+  const counts = new Map<string, number>();
+  events.forEach((message) => { const label = eventNames[message.event!.kind] || "互动事件"; counts.set(label, (counts.get(label) || 0) + 1); });
+  const overview = counts.size ? Array.from(counts.entries()).map(([label, count]) => `${label} ${count} 次`).join("、") : "未识别到非文字互动事件";
+  const timeline = events.slice(-8).map((message) => `- ${message.date}${message.time ? ` ${message.time}` : ""}：${message.event?.actor ? `${message.event.actor} · ` : ""}${message.event?.description || message.text}`).join("\n") || "- 暂无互动事件";
+  return { total: events.length, overview, timeline };
+}
+
 function contentCharacters(text: string) {
   return Array.from(text.replace(/[^\u4e00-\u9fffA-Za-z0-9]/g, ""));
 }
 
 export function createStyleSnapshot(messages: CorpusMessage[], roles: Record<string, SpeakerRole>): StyleSnapshot {
-  const taMessages = messagesForRole(messages, roles, "ta").filter((item) => !/^\[.+\]$/.test(item.text));
-  const meMessages = messagesForRole(messages, roles, "me");
+  const taMessages = messagesForRole(messages, roles, "ta").filter((item) => !item.event && item.kind !== "uncertain" && !/^\[.+\]$/.test(item.text));
+  const meMessages = messagesForRole(messages, roles, "me").filter((item) => !item.event && item.kind !== "uncertain");
   const lengths = taMessages.map((item) => contentCharacters(item.text).length).filter(Boolean);
   const gramCounts = new Map<string, number>();
   taMessages.forEach((item) => {
@@ -337,6 +389,7 @@ export function createPersona(messages: CorpusMessage[], roles: Record<string, S
   const name = personaName(messages, roles);
   if (!snapshot.taCount) return "# 尚未生成画像\n\n请先导入记录，并在「语料」页指定谁是 TA。";
   const phraseText = snapshot.phrases.length ? snapshot.phrases.map((item) => `${item.text}（${item.count}次）`).join("、") : "尚未识别到稳定高频口头禅";
+  const interactions = summarizeInteractionEvents(messages);
   return `# 前任 · ${name} · 对话角色复刻（浏览器本地生成）
 
 ## 记录范围
@@ -347,6 +400,10 @@ export function createPersona(messages: CorpusMessage[], roles: Record<string, S
 - TA 平均每条约 ${snapshot.averageLength.toFixed(1)} 字；${Math.round(snapshot.shortRate * 100)}% 的消息不超过 10 字。
 - 建议回复保持口语、短句、不过度补充未在记录出现的重要事实。
 - 高频片段：${phraseText}。
+
+## 互动事件线索
+- 已保留 ${interactions.total} 条非文字互动：${interactions.overview}。
+- 这些事件用于还原互动节奏与情境，不把“语音 / 转账 / 表情”等占位内容误读成对方说过的文字。
 
 ## 使用边界
 - 这是依照聊天记录进行的风格整理与本地复刻，不是真人，也不应替代现实沟通。
@@ -368,6 +425,7 @@ export function createIntegratedPortrait(archive: ArchiveState) {
   const questionMarkers = markerCount([...ta, ...me], [/[？?]$/]);
   const evidence = snapshot.taCount + snapshot.meCount;
   const phraseText = snapshot.phrases.length ? snapshot.phrases.map((item) => `“${item.text}”`).join("、") : "暂未形成稳定高频片段";
+  const interactions = summarizeInteractionEvents(archive.messages);
   const context = archive.profile.relationshipContext.trim() || "尚未补充关系背景";
   const targetBirthday = archive.profile.targetBirthday.trim() || "未补充";
   const targetZodiac = archive.profile.targetZodiac.trim() || "未补充";
@@ -399,6 +457,12 @@ export function createIntegratedPortrait(archive: ArchiveState) {
 - 修复/澄清类措辞出现 ${repairMarkers} 次；它可作为“冲突后是否尝试说开”的观察入口，而不是谁对谁错的证据。
 - 问句或主动追问线索出现 ${questionMarkers} 次；建议结合具体时间段阅读，而非单独用数量解释在意程度。
 
+## 互动事件时间线
+- 已保留 ${interactions.total} 条非文字互动：${interactions.overview}。
+- 近期事件（按归档时间顺序）：
+${interactions.timeline}
+- 事件反映的是当时发生的互动与媒介，不自动推断动机、金额含义或关系承诺。
+
 ## 依恋与关系阅读（非诊断）
 - 若你关心“偏焦虑、偏回避或安全型”之类标签，更可靠的做法是观察具体互动：需要回应时如何表达、压力来临时如何拉开距离、发生误会后是否愿意修复。
 - 现有记录能呈现的是措辞和节奏，不能判断任何人的依恋类型、人格或动机。把“我看到的行为”与“我感受到的需要”分开记录，通常比贴标签更有帮助。
@@ -417,7 +481,7 @@ export function createIntegratedPortrait(archive: ArchiveState) {
 }
 
 export function localMimic(input: string, messages: CorpusMessage[], roles: Record<string, SpeakerRole>) {
-  const candidates = messagesForRole(messages, roles, "ta").filter((item) => item.text.length > 0 && !/^\[.+\]$/.test(item.text));
+  const candidates = messagesForRole(messages, roles, "ta").filter((item) => !item.event && item.kind !== "uncertain" && item.text.length > 0 && !/^\[.+\]$/.test(item.text));
   if (!candidates.length) return "先把聊天记录放进档案里，我才有足够的语气线索。";
   const query = new Set(contentCharacters(input).join("").match(/.{1,2}/g) ?? []);
   const ranked = candidates
