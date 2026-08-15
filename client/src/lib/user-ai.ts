@@ -98,6 +98,6 @@ export async function requestUserApiChat(config: UserApiConfig, system: string, 
     response = await fetch(`${root(config.baseUrl)}/models/${encodeURIComponent(config.model)}:generateContent?key=${encodeURIComponent(config.apiKey)}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ systemInstruction: { parts: [{ text: system }] }, contents: messages.map((message) => ({ role: message.role === "assistant" ? "model" : "user", parts: [{ text: message.content }] })) }) });
     if (!response.ok) throw new Error((await readFailure(response)) || "Gemini 接口请求失败。"); const payload = await response.json(); const text = payload?.candidates?.[0]?.content?.parts?.[0]?.text; if (typeof text !== "string") throw new Error("Gemini 返回了无效回复。"); return text;
   }
-  response = await fetch(`${root(config.baseUrl)}/chat/completions`, { method: "POST", headers: headers(config), body: JSON.stringify({ model: config.model, messages: requestMessages, temperature: 0.7 }) });
+  response = await fetch(`${root(config.baseUrl)}/chat/completions`, { method: "POST", headers: headers(config), body: JSON.stringify({ model: config.model, messages: requestMessages }) });
   if (!response.ok) throw new Error((await readFailure(response)) || "OpenAI 兼容接口请求失败。"); const payload = await response.json(); const text = payload?.choices?.[0]?.message?.content; if (typeof text !== "string") throw new Error("模型返回了无效回复。"); return text;
 }
