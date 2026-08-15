@@ -1,5 +1,6 @@
-/** 前任在线连接：浏览器只与 Cloudflare Worker 通信，不持有模型服务密钥。 */
-export const DEFAULT_WORKER_URL = "https://qianren-api.2333333434.workers.dev";
+/** 前任在线连接：浏览器仅访问网站自定义域名下的 API，不持有模型服务密钥。 */
+export const LEGACY_WORKER_URL = "https://qianren-api.2333333434.workers.dev";
+export const DEFAULT_WORKER_URL = "https://better456.dpdns.org/api";
 
 export type WorkerHealth = { service: string; status: string; aiConfigured: boolean };
 
