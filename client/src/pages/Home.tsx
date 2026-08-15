@@ -194,8 +194,11 @@ export default function Home() {
     try {
       const result = await probeUserApi(userApi);
       setUserApiProbe(result);
-      if (result.ok) toast.success("用户 API 已连通", { description: `模型列表响应 ${result.latencyMs} ms。` });
-      else toast.error("用户 API 未连通", { description: result.message });
+      if (result.ok) {
+        setUserApi((previous) => ({ ...previous, enabled: true }));
+        setOnlineMode(true);
+        toast.success("用户 API 已连通并启用在线对话", { description: `模型列表响应 ${result.latencyMs} ms。` });
+      } else toast.error("用户 API 未连通", { description: result.message });
     } catch (error) {
       const message = error instanceof Error ? error.message : "无法测试该接口";
       setUserApiProbe({ ok: false, latencyMs: 0, message, checkedAt: Date.now() });
@@ -224,11 +227,11 @@ export default function Home() {
     setSending(true);
     let response: string;
     try {
-      response = onlineMode
-        ? userApi.enabled
-          ? await requestUserApiChat(userApi, currentPersona, history)
-          : await requestOnlineChat(workerUrl, currentPersona, history)
-        : localMimic(text, archive.messages, archive.roles);
+      response = userApi.enabled
+        ? await requestUserApiChat(userApi, currentPersona, history)
+        : onlineMode
+          ? await requestOnlineChat(workerUrl, currentPersona, history)
+          : localMimic(text, archive.messages, archive.roles);
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "在线回复失败", { description: "已保留本地档案；可切换回离线模式。" });
       setSending(false);
@@ -334,16 +337,16 @@ export default function Home() {
         {screen === "chat" && (
           <section className="chat-layout">
             <div className="paper-panel chat-paper">
-              <div className="panel-heading"><div><span className="panel-index">C-01</span><h2>{activeSession?.name || "还没有开始会话"}</h2></div><span className="source-note">离线复刻</span></div>
+              <div className="panel-heading"><div><span className="panel-index">C-01</span><h2>{activeSession?.name || "还没有开始会话"}</h2></div><span className="source-note">{userApi.enabled ? "用户 API 在线" : onlineMode ? "网站在线代理" : "离线复刻"}</span></div>
               {activeSession?.messages.length ? (
                 <div className="message-thread">
                   {activeSession.messages.map((message) => <div key={message.id} className={`message-row ${message.sender === "me" ? "from-me" : "from-ta"}`}><span className="message-author">{message.sender === "me" ? "我" : persona}</span><p>{message.text}</p></div>)}
                 </div>
               ) : (
-                <div className="chat-empty"><div className="hero-paper"><img src={heroUrl} alt="档案纸张与索引卡" /><div className="archive-artifacts" aria-hidden="true"><span className="source-slip slip-a">SOURCE<br/>FRAGMENT</span><span className="source-slip slip-b">归档中</span><i /></div><div className="hero-overlay"><span>LOCAL REPLICA · NOT A PERSON</span><p>记录里的语言习惯，会留下一些线索。</p></div></div><p>先归档记录，再开始一段本地离线对话。</p></div>
+                <div className="chat-empty"><div className="hero-paper"><img src={heroUrl} alt="档案纸张与索引卡" /><div className="archive-artifacts" aria-hidden="true"><span className="source-slip slip-a">SOURCE<br/>FRAGMENT</span><span className="source-slip slip-b">归档中</span><i /></div><div className="hero-overlay"><span>{userApi.enabled ? "YOUR API · ONLINE" : onlineMode ? "ONLINE PROXY · NOT A PERSON" : "LOCAL REPLICA · NOT A PERSON"}</span><p>记录里的语言习惯，会留下一些线索。</p></div></div><p>{userApi.enabled ? `已启用你的 API 与模型「${userApi.model || "未选择"}」，发送消息将直接请求在线模型。` : onlineMode ? "已启用网站在线代理，发送消息将请求在线模型。" : "先归档记录，再开始一段本地离线对话。"}</p></div>
               )}
               <div className="composer"><textarea value={draft} onChange={(event) => setDraft(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); void send(); } }} placeholder={snapshot.taCount ? `对 ${persona} 说点什么…` : "请先导入并分配语料"} rows={2} /><button className="send-button" onClick={() => void send()} aria-label="发送" disabled={sending}>{sending ? <span className="send-loading" /> : <SendHorizontal size={18} />}</button></div>
-              <p className="composer-note">Enter 发送 · {onlineMode ? userApi.enabled ? "由你的 API 直接请求模型；密钥仅在此浏览器使用。" : "由 Cloudflare Worker 代理在线模型；密钥不进入浏览器。" : "本地检索原始语料表达，不调用模型服务。"}</p>
+              <p className="composer-note">Enter 发送 · {userApi.enabled ? `正在使用你的 API 与模型「${userApi.model || "未选择"}」；密钥仅在此浏览器使用。` : onlineMode ? "由网站在线代理请求模型；密钥不进入浏览器。" : "本地检索原始语料表达，不调用模型服务。"}</p>
             </div>
             <aside className="margin-rail">
               <div className="rail-card identity-card"><span className="rail-label">当前复刻</span><div className="persona-token"><span>{persona.slice(0, 1)}</span><div><b>{persona}</b><small>由 {snapshot.taCount} 条 TA 语料整理</small></div></div><div className="identity-rule" /><p>不是本人，也不替代现实沟通。</p></div>

@@ -3,14 +3,87 @@ import { Gauge, KeyRound, Link2, Radio, RefreshCw, ShieldCheck } from "lucide-re
 import type { ApiProbe, ApiProtocol, ApiProvider, UserApiConfig } from "@/lib/user-ai";
 import { fetchUserApiModels } from "@/lib/user-ai";
 
-type Props = { config: UserApiConfig; probe: ApiProbe | null; testing: boolean; onChange: (patch: Partial<UserApiConfig>) => void; onProvider: (provider: ApiProvider) => void; onTest: () => void };
-const providers: Array<[ApiProvider, string]> = [["gemini", "Gemini"], ["openai", "ChatGPT / OpenAI"], ["anthropic", "Claude"], ["grok", "Grok"], ["minimax", "MiniMax"], ["zhipu", "智谱 GLM"], ["qwen", "通义千问"], ["doubao", "豆包"], ["deepseek", "DeepSeek"], ["baichuan", "百川"], ["01ai", "零一万物"], ["moonshot", "Moonshot"], ["custom", "自定义接口"]];
-const protocols: Array<[ApiProtocol, string]> = [["openai", "OpenAI Responses / Chat Completions"], ["openai-compatible", "OpenAI 兼容接口"], ["anthropic", "Anthropic Messages"], ["gemini", "Google Gemini API"]];
+type Props = {
+  config: UserApiConfig;
+  probe: ApiProbe | null;
+  testing: boolean;
+  onChange: (patch: Partial<UserApiConfig>) => void;
+  onProvider: (provider: ApiProvider) => void;
+  onTest: () => void;
+};
+
+const providers: Array<[ApiProvider, string]> = [
+  ["gemini", "Gemini"], ["openai", "ChatGPT / OpenAI"], ["anthropic", "Claude"], ["grok", "Grok"],
+  ["minimax", "MiniMax"], ["zhipu", "智谱 GLM"], ["qwen", "通义千问"], ["doubao", "豆包"],
+  ["deepseek", "DeepSeek"], ["baichuan", "百川"], ["01ai", "零一万物"], ["moonshot", "Moonshot"], ["custom", "自定义接口"],
+];
+const protocols: Array<[ApiProtocol, string]> = [
+  ["openai", "OpenAI Responses / Chat Completions"], ["openai-compatible", "OpenAI 兼容接口"],
+  ["anthropic", "Anthropic Messages"], ["gemini", "Google Gemini API"],
+];
 
 export default function UserApiPanel({ config, probe, testing, onChange, onProvider, onTest }: Props) {
   const [loadingModels, setLoadingModels] = useState(false);
   const [modelMessage, setModelMessage] = useState("");
-  const getModels = async () => { setLoadingModels(true); setModelMessage("正在获取模型列表…"); try { const result = await fetchUserApiModels(config); onChange({ availableModels: result.models, selectedModels: config.selectedModels.filter((id) => result.models.some((model) => model.id === id)) }); setModelMessage(`已获取 ${result.models.length} 个模型 · ${result.latencyMs} ms`); } catch (error) { setModelMessage(error instanceof Error ? error.message : "获取模型失败"); } finally { setLoadingModels(false); } };
-  const toggleModel = (id: string, checked: boolean) => onChange({ selectedModels: checked ? config.selectedModels.includes(id) ? config.selectedModels : [...config.selectedModels, id] : config.selectedModels.filter((item) => item !== id), model: checked && !config.model ? id : config.model });
-  return <div className="user-api-panel"><div className="api-panel-heading"><div><span className="panel-index">A-09</span><h3>用户自带 AI</h3><p>支持主流国内外厂商与 OpenAI 兼容接口；先连通测速，再获取并勾选模型。</p></div><span className="api-local-stamp"><ShieldCheck size={14} /> LOCAL KEY</span></div><div className="api-mode-row"><button className={config.connectionMode === "direct" ? "is-active" : ""} onClick={() => onChange({ connectionMode: "direct" })}><Radio size={15} /> 服务商直连</button><button className={config.connectionMode === "relay" ? "is-active" : ""} onClick={() => onChange({ connectionMode: "relay", provider: "custom" })}><Link2 size={15} /> 自定义中转站</button></div><div className="api-fields"><label>接口类型<select value={config.protocol} onChange={(event) => onChange({ protocol: event.target.value as ApiProtocol, availableModels: [], selectedModels: [] })}>{protocols.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label><label>模型厂商<select value={config.provider} onChange={(event) => onProvider(event.target.value as ApiProvider)}>{providers.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label><label>当前对话模型<select value={config.model} onChange={(event) => onChange({ model: event.target.value })}><option value="">请先获取模型</option>{config.availableModels.map((model) => <option key={model.id} value={model.id}>{model.id}</option>)}{config.model && !config.availableModels.some((model) => model.id === config.model) && <option value={config.model}>{config.model}</option>}</select></label><label className="api-wide">Base URL<input value={config.baseUrl} onChange={(event) => onChange({ baseUrl: event.target.value })} placeholder="https://…/v1" /></label><label className="api-wide">API Key<input value={config.apiKey} onChange={(event) => onChange({ apiKey: event.target.value })} type="password" autoComplete="off" placeholder="仅用于当前浏览器" /></label></div><div className="api-action-row"><label className="remember-key"><input type="checkbox" checked={config.rememberKey} onChange={(event) => onChange({ rememberKey: event.target.checked })} /> 仅在此浏览器保存此 Key</label><label className="enable-api"><input type="checkbox" checked={config.enabled} onChange={(event) => onChange({ enabled: event.target.checked })} /> 对话使用我的 API</label><button className="outline-button api-test-button" onClick={onTest} disabled={testing}><Gauge size={16} /> {testing ? "测试中…" : "连通 / 测速"}</button><button className="outline-button api-test-button" onClick={getModels} disabled={loadingModels}><RefreshCw size={15} /> {loadingModels ? "获取中…" : "获取模型"}</button></div>{probe && <div className={`api-probe ${probe.ok ? "is-ok" : "is-failed"}`}><KeyRound size={15} /><span>{probe.ok ? `${probe.message} · ${probe.latencyMs} ms` : `未连通 · ${probe.message}`}</span></div>}{modelMessage && <div className="api-probe"><RefreshCw size={15} /><span>{modelMessage}</span></div>}{config.availableModels.length > 0 && <div className="api-model-picker"><div className="api-model-picker-heading"><strong>可用模型（勾选后保存）</strong><div><button onClick={() => onChange({ selectedModels: config.availableModels.map((model) => model.id) })}>全选</button><button onClick={() => onChange({ selectedModels: [] })}>清空</button></div></div><div className="api-model-grid">{config.availableModels.map((model) => <label key={model.id}><input type="checkbox" checked={config.selectedModels.includes(model.id)} onChange={(event) => toggleModel(model.id, event.target.checked)} /><span>{model.id}</span><small>{model.ownedBy || "可用"}</small></label>)}</div></div>}<p className="api-footnote">测试与模型发现请求访问服务商的 GET /models（Gemini 使用 /models）；部分服务商会因 CORS 禁止浏览器直连。API Key 不会保存到仓库。</p></div>;
+  const canActivate = (model: string) => Boolean(model && config.baseUrl.trim() && config.apiKey.trim());
+
+  const getModels = async () => {
+    setLoadingModels(true);
+    setModelMessage("正在获取模型列表…");
+    try {
+      const result = await fetchUserApiModels(config);
+      const validSelected = config.selectedModels.filter((id) => result.models.some((model) => model.id === id));
+      const currentStillAvailable = result.models.some((model) => model.id === config.model);
+      const model = currentStillAvailable ? config.model : validSelected[0] || result.models[0]?.id || "";
+      onChange({
+        availableModels: result.models,
+        selectedModels: validSelected,
+        model,
+        enabled: canActivate(model) ? true : config.enabled,
+      });
+      setModelMessage(`已获取 ${result.models.length} 个模型 · ${result.latencyMs} ms${model ? ` · 已准备使用 ${model}` : ""}`);
+    } catch (error) {
+      setModelMessage(error instanceof Error ? error.message : "获取模型失败");
+    } finally {
+      setLoadingModels(false);
+    }
+  };
+
+  const toggleModel = (id: string, checked: boolean) => {
+    const selectedModels = checked
+      ? config.selectedModels.includes(id) ? config.selectedModels : [...config.selectedModels, id]
+      : config.selectedModels.filter((item) => item !== id);
+    const model = checked ? id : config.model === id ? selectedModels[0] || "" : config.model;
+    onChange({ selectedModels, model, enabled: canActivate(model) ? true : config.enabled });
+  };
+
+  const chooseModel = (model: string) => onChange({ model, enabled: canActivate(model) ? true : config.enabled });
+
+  return <div className="user-api-panel">
+    <div className="api-panel-heading">
+      <div><span className="panel-index">A-09</span><h3>用户自带 AI</h3><p>填写接口并选择模型后会自动进入在线对话；仍可随时关闭“对话使用我的 API”。</p></div>
+      <span className="api-local-stamp"><ShieldCheck size={14} /> LOCAL KEY</span>
+    </div>
+    <div className="api-mode-row">
+      <button className={config.connectionMode === "direct" ? "is-active" : ""} onClick={() => onChange({ connectionMode: "direct" })}><Radio size={15} /> 服务商直连</button>
+      <button className={config.connectionMode === "relay" ? "is-active" : ""} onClick={() => onChange({ connectionMode: "relay", provider: "custom", protocol: "openai-compatible" })}><Link2 size={15} /> 自定义中转站</button>
+    </div>
+    <div className="api-fields">
+      <label>接口类型<select value={config.protocol} onChange={(event) => onChange({ protocol: event.target.value as ApiProtocol, availableModels: [], selectedModels: [] })}>{protocols.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>
+      <label>模型厂商<select value={config.provider} onChange={(event) => onProvider(event.target.value as ApiProvider)}>{providers.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>
+      <label>当前对话模型<select value={config.model} onChange={(event) => chooseModel(event.target.value)}><option value="">请先获取或勾选模型</option>{config.availableModels.map((model) => <option key={model.id} value={model.id}>{model.id}</option>)}{config.model && !config.availableModels.some((model) => model.id === config.model) && <option value={config.model}>{config.model}</option>}</select></label>
+      <label className="api-wide">Base URL<input value={config.baseUrl} onChange={(event) => onChange({ baseUrl: event.target.value })} placeholder="https://…/v1" /></label>
+      <label className="api-wide">API Key<input value={config.apiKey} onChange={(event) => onChange({ apiKey: event.target.value })} type="password" autoComplete="off" placeholder="仅用于当前浏览器" /></label>
+    </div>
+    <div className="api-action-row">
+      <label className="remember-key"><input type="checkbox" checked={config.rememberKey} onChange={(event) => onChange({ rememberKey: event.target.checked })} /> 仅在此浏览器保存此 Key</label>
+      <label className="enable-api"><input type="checkbox" checked={config.enabled} onChange={(event) => onChange({ enabled: event.target.checked })} /> 对话使用我的 API</label>
+      <button className="outline-button api-test-button" onClick={onTest} disabled={testing}><Gauge size={16} /> {testing ? "测试中…" : "连通 / 测速"}</button>
+      <button className="outline-button api-test-button" onClick={getModels} disabled={loadingModels}><RefreshCw size={15} /> {loadingModels ? "获取中…" : "获取模型"}</button>
+    </div>
+    {probe && <div className={`api-probe ${probe.ok ? "is-ok" : "is-failed"}`}><KeyRound size={15} /><span>{probe.ok ? `${probe.message} · ${probe.latencyMs} ms` : `未连通 · ${probe.message}`}</span></div>}
+    {modelMessage && <div className="api-probe"><RefreshCw size={15} /><span>{modelMessage}</span></div>}
+    {config.availableModels.length > 0 && <div className="api-model-picker"><div className="api-model-picker-heading"><strong>可用模型（勾选任意模型即可作为当前在线模型）</strong><div><button onClick={() => onChange({ selectedModels: config.availableModels.map((model) => model.id), model: config.model || config.availableModels[0]?.id || "", enabled: canActivate(config.model || config.availableModels[0]?.id || "") ? true : config.enabled })}>全选</button><button onClick={() => onChange({ selectedModels: [] })}>清空</button></div></div><div className="api-model-grid">{config.availableModels.map((model) => <label key={model.id}><input type="checkbox" checked={config.selectedModels.includes(model.id)} onChange={(event) => toggleModel(model.id, event.target.checked)} /><span>{model.id}</span><small>{model.ownedBy || "可用"}</small></label>)}</div></div>}
+    <p className="api-footnote">连接测试成功或勾选模型后会自动打开在线对话。部分服务商可能因 CORS 禁止浏览器直连，可改用兼容中转站。</p>
+  </div>;
 }
