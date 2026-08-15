@@ -8,13 +8,13 @@ import {
 import { toast } from "sonner";
 import {
   ArchiveState, ChatSession, CorpusMessage, SpeakerRole, createPersona, createStyleSnapshot,
-  downloadFile, emptyArchive, loadArchive, localMimic, mergeMessages, messagesForRole,
+  createIntegratedPortrait, downloadFile, emptyArchive, loadArchive, localMimic, mergeMessages, messagesForRole,
   parseChatText, personaName, roleOf, sampleCorpus, saveArchive, speakersFor, uid,
 } from "@/lib/archive";
 import { decryptArchive, encryptArchive, isEncryptedArchive } from "@/lib/crypto";
 import { DEFAULT_WORKER_URL, WorkerHealth, checkWorkerHealth, requestOnlineChat } from "@/lib/online";
 
-type Screen = "chat" | "corpus" | "persona" | "insights" | "settings";
+type Screen = "chat" | "corpus" | "persona" | "insights" | "portrait" | "settings";
 
 const logoUrl = "./images/qianren-logo.png";
 const heroUrl = "./images/qianren-archive-hero.jpg";
@@ -26,7 +26,8 @@ const screenMeta: Record<Screen, { chapter: string; title: string; description: 
   corpus: { chapter: "02 · 语料册", title: "从一段记录开始整理。", description: "粘贴或导入 TXT，在浏览器本地完成解析与角色分配。", icon: FolderOpen },
   persona: { chapter: "03 · 语言画像", title: "把习惯，变成可读的线索。", description: "由语料中的长度、时段和高频片段自动生成。", icon: BrainCircuit },
   insights: { chapter: "04 · 关系边注", title: "只描述模式，不替你下结论。", description: "查看双方消息量、活跃时段与语言痕迹。", icon: BookOpenText },
-  settings: { chapter: "05 · 本地设置", title: "数据留在此处。", description: "网页版本使用浏览器本地存储，不上传聊天内容。", icon: Settings2 },
+  portrait: { chapter: "05 · 共同画像", title: "把线索编成一份可回看的档案。", description: "真实语料、确认补充与自愿资料共同组成画像。", icon: Sparkles },
+  settings: { chapter: "06 · 本地设置", title: "数据留在此处。", description: "网页版本使用浏览器本地存储，不上传聊天内容。", icon: Settings2 },
 };
 
 function makeSession(): ChatSession {
@@ -54,6 +55,7 @@ export default function Home() {
   const [testingWorker, setTestingWorker] = useState(false);
   const [sending, setSending] = useState(false);
   const [backupPassphrase, setBackupPassphrase] = useState("");
+  const [learningSnippet, setLearningSnippet] = useState("");
   const importInput = useRef<HTMLInputElement>(null);
   const restoreInput = useRef<HTMLInputElement>(null);
 
@@ -67,6 +69,7 @@ export default function Home() {
   const speakers = useMemo(() => speakersFor(archive.messages), [archive.messages]);
   const preview = useMemo(() => parseChatText(importText), [importText]);
   const activeSession = archive.sessions.find((item) => item.id === archive.activeSessionId) ?? archive.sessions[0] ?? null;
+  const integratedPortrait = useMemo(() => createIntegratedPortrait(archive), [archive]);
   const currentMeta = screenMeta[screen];
 
   const setArchiveSafely = (updater: (previous: ArchiveState) => ArchiveState) => setArchive((previous) => updater(previous));
@@ -96,6 +99,30 @@ export default function Home() {
 
   const setRole = (speaker: string, role: SpeakerRole) => {
     setArchiveSafely((previous) => ({ ...previous, roles: { ...previous.roles, [speaker]: role } }));
+  };
+
+  const updateProfile = (key: keyof ArchiveState["profile"], value: string) => {
+    setArchiveSafely((previous) => ({ ...previous, profile: { ...previous.profile, [key]: value } }));
+  };
+
+  const confirmLearning = () => {
+    const text = learningSnippet.trim();
+    if (text.length < 2) {
+      toast.error("请补充一条真实表达", { description: "只有你确认来自真实聊天的内容才会进入学习档。" });
+      return;
+    }
+    setArchiveSafely((previous) => {
+      const speaker = previous.profile.targetName.trim() || personaName(previous.messages, previous.roles);
+      const sample: CorpusMessage = { id: uid("confirmed"), speaker, text, date: "手动确认", time: "" };
+      return {
+        ...previous,
+        messages: [...previous.messages, sample],
+        roles: { ...previous.roles, [speaker]: "ta" },
+        profile: { ...previous.profile, confirmedSamples: [...previous.profile.confirmedSamples, text].slice(-60) },
+      };
+    });
+    setLearningSnippet("");
+    toast.success("已加入确认学习档", { description: "这条真实表达会参与后续本地复刻与综合报告。" });
   };
 
   const createConversation = () => {
@@ -189,7 +216,7 @@ export default function Home() {
       const parsed: unknown = JSON.parse(await file.text());
       const restored = isEncryptedArchive(parsed) ? await decryptArchive(parsed, backupPassphrase) : parsed as ArchiveState;
       if (!restored || !Array.isArray(restored.messages) || !Array.isArray(restored.sessions)) throw new Error("invalid");
-      setArchive({ messages: restored.messages, roles: restored.roles ?? {}, sessions: restored.sessions, activeSessionId: restored.activeSessionId ?? null });
+        setArchive({ ...emptyArchive(), messages: restored.messages, roles: restored.roles ?? {}, sessions: restored.sessions, activeSessionId: restored.activeSessionId ?? null, profile: restored.profile ?? emptyArchive().profile });
       setBackupPassphrase("");
       toast.success(isEncryptedArchive(parsed) ? "加密档案已恢复" : "本地档案已恢复");
     } catch (error) {
@@ -276,6 +303,10 @@ export default function Home() {
 
         {screen === "insights" && (
           <section className="insights-layout"><div className="paper-panel insight-paper"><div className="panel-heading"><div><span className="panel-index">N-05</span><h2>关系边注</h2></div><span className="source-note">描述性统计</span></div><div className="insight-summary"><div><span>TA / 我</span><b>{snapshot.taCount} <i>/</i> {snapshot.meCount}</b><p>已纳入角色分配的消息数</p></div><div><span>活跃日期</span><b>{snapshot.activeDays || "—"}</b><p>带可识别日期的记录</p></div><div><span>语言样本</span><b>{snapshot.phrases.length || "—"}</b><p>已提取的高频片段</p></div></div><div className="tempo-section"><div className="tempo-head"><span>TA 的活跃时段</span><small>按带时间的已归档消息汇总</small></div><div className="hour-bars">{Array.from({ length: 24 }, (_, hour) => { const height = snapshot.taCount && hour === snapshot.peakHour ? 100 : 14; return <div key={hour} className={hour === snapshot.peakHour && snapshot.taCount ? "is-peak" : ""}><span style={{ height: `${height}%` }} /><small>{hour % 3 === 0 ? String(hour).padStart(2, "0") : ""}</small></div>; })}</div></div><div className="boundary-note"><ShieldCheck size={17} /><p><b>解读边界</b>：网页版本只显示记录中的可观察模式，不判断人格、关系价值或心理状态。</p></div></div><aside className="insight-aside"><img src={insightArtUrl} alt="沟通节奏的抽象图像" /><p>“数据能提示习惯，不能替你定义一段关系。”</p></aside></section>
+        )}
+
+        {screen === "portrait" && (
+          <section className="portrait-layout"><div className="paper-panel portrait-form"><div className="panel-heading"><div><span className="panel-index">P-06</span><h2>共同画像资料卡</h2></div><span className="source-note">自愿补充 · 本地保存</span></div><div className="profile-grid"><label>TA 称呼<input value={archive.profile.targetName} onChange={(event) => updateProfile("targetName", event.target.value)} placeholder={persona === "TA" ? "例如：小雨" : persona} /></label><label>生日<input value={archive.profile.birthday} onChange={(event) => updateProfile("birthday", event.target.value)} placeholder="例如：1998-07-18（可留空）" /></label><label>星座<input value={archive.profile.zodiac} onChange={(event) => updateProfile("zodiac", event.target.value)} placeholder="例如：巨蟹座（仅作文化线索）" /></label><label>关系背景<input value={archive.profile.relationshipContext} onChange={(event) => updateProfile("relationshipContext", event.target.value)} placeholder="例如：分开后仍偶尔联系" /></label><label className="profile-wide">我的边注<textarea value={archive.profile.reflection} onChange={(event) => updateProfile("reflection", event.target.value)} placeholder="写下你希望在报告中保留的真实背景、界限或待观察的问题。" rows={3} /></label></div><div className="learning-ledger"><div><span className="rail-label">确认学习</span><h3>只加入真实且由你确认的表达</h3><p>AI 在本页生成的回复不会自动变成 TA 的新语料，避免“越学越像自己”的循环。</p></div><textarea value={learningSnippet} onChange={(event) => setLearningSnippet(event.target.value)} placeholder="粘贴一条新增的真实聊天表达，例如：‘到了和我说一声。’" rows={3} /><button className="primary-button" onClick={confirmLearning}><Archive size={16} /> 确认加入</button><small>已确认 {archive.profile.confirmedSamples.length} 条补充样本</small></div></div><div className="paper-panel integrated-portrait"><div className="panel-heading"><div><span className="panel-index">F-07</span><h2>最后的综合画像</h2></div><button className="micro-action labelled" onClick={() => downloadFile("前任-综合互动画像.md", integratedPortrait, "text/markdown;charset=utf-8")}><Download size={15} /> 导出报告</button></div><pre>{integratedPortrait}</pre></div><aside className="portrait-rail"><div className="rail-card"><span className="rail-label">证据边界</span><b>{snapshot.taCount + snapshot.meCount} 条真实记录</b><p>报告只读取本地档案与明确确认的补充样本；生成回复不回写为证据。</p></div><div className="rail-card caution-card"><span className="rail-label">关系阅读</span><p>依恋、人格和“人性”问题只以互动线索讨论，不给任何人贴诊断式标签。</p></div><button className="outline-button rail-action" onClick={() => setScreen("insights")}><BookOpenText size={16} /> 查看关系边注</button></aside></section>
         )}
 
         {screen === "settings" && (

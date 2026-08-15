@@ -24,11 +24,21 @@ export type ChatSession = {
   messages: ChatMessage[];
 };
 
+export type PortraitProfile = {
+  targetName: string;
+  birthday: string;
+  zodiac: string;
+  relationshipContext: string;
+  reflection: string;
+  confirmedSamples: string[];
+};
+
 export type ArchiveState = {
   messages: CorpusMessage[];
   roles: Record<string, SpeakerRole>;
   sessions: ChatSession[];
   activeSessionId: string | null;
+  profile: PortraitProfile;
 };
 
 export type StyleSnapshot = {
@@ -44,11 +54,21 @@ export type StyleSnapshot = {
 
 const STORAGE_KEY = "qianren-browser-archive-v1";
 
+export const emptyProfile = (): PortraitProfile => ({
+  targetName: "",
+  birthday: "",
+  zodiac: "",
+  relationshipContext: "",
+  reflection: "",
+  confirmedSamples: [],
+});
+
 export const emptyArchive = (): ArchiveState => ({
   messages: [],
   roles: {},
   sessions: [],
   activeSessionId: null,
+  profile: emptyProfile(),
 });
 
 export function uid(prefix: string) {
@@ -65,6 +85,11 @@ export function loadArchive(): ArchiveState {
       roles: parsed.roles ?? {},
       sessions: Array.isArray(parsed.sessions) ? parsed.sessions : [],
       activeSessionId: parsed.activeSessionId ?? null,
+      profile: {
+        ...emptyProfile(),
+        ...(parsed.profile ?? {}),
+        confirmedSamples: Array.isArray(parsed.profile?.confirmedSamples) ? parsed.profile.confirmedSamples : [],
+      },
     };
   } catch {
     return emptyArchive();
@@ -202,6 +227,62 @@ export function createPersona(messages: CorpusMessage[], roles: Record<string, S
 - 这是依照聊天记录进行的风格整理与本地复刻，不是真人，也不应替代现实沟通。
 - 当对话涉及强烈困扰或安全风险时，请停止沉浸式模仿，优先联系可信任的现实支持。
 `;
+}
+
+function markerCount(messages: CorpusMessage[], patterns: RegExp[]) {
+  return messages.reduce((total, message) => total + Number(patterns.some((pattern) => pattern.test(message.text))), 0);
+}
+
+export function createIntegratedPortrait(archive: ArchiveState) {
+  const snapshot = createStyleSnapshot(archive.messages, archive.roles);
+  const name = archive.profile.targetName.trim() || personaName(archive.messages, archive.roles);
+  const ta = messagesForRole(archive.messages, archive.roles, "ta");
+  const me = messagesForRole(archive.messages, archive.roles, "me");
+  const careMarkers = markerCount(ta, [/吃了吗|到家|早点睡|晚安|辛苦|累不累|注意|别难过|抱抱|想你/]);
+  const repairMarkers = markerCount([...ta, ...me], [/对不起|抱歉|没事|别生气|误会|解释|冷静|说开|和好/]);
+  const questionMarkers = markerCount([...ta, ...me], [/[？?]$/]);
+  const evidence = snapshot.taCount + snapshot.meCount;
+  const phraseText = snapshot.phrases.length ? snapshot.phrases.map((item) => `“${item.text}”`).join("、") : "暂未形成稳定高频片段";
+  const context = archive.profile.relationshipContext.trim() || "尚未补充关系背景";
+  const birthday = archive.profile.birthday.trim() || "未补充";
+  const zodiac = archive.profile.zodiac.trim() || "未补充";
+  const reflection = archive.profile.reflection.trim() || "未补充";
+  const learningCount = archive.profile.confirmedSamples.length;
+  const evidenceNote = evidence < 24 ? "样本仍偏少，以下内容应视为待验证的阅读线索。" : "样本覆盖到多段互动，但结论仍只描述已记录的互动方式。";
+
+  return `# ${name} · 综合互动画像
+
+> 这是一份基于已归档对话、用户确认补充样本与自愿背景资料生成的本地报告。它不诊断人格、依恋类型或心理健康，也不替代现实沟通与专业支持。
+
+## 档案范围
+- 已归档真实记录：${snapshot.total} 条；其中 ${name} ${snapshot.taCount} 条、我 ${snapshot.meCount} 条。
+- 用户确认补充的真实表达：${learningCount} 条。AI 在本页生成的回复不会被回写为真实语料。
+- ${evidenceNote}
+
+## 表达画像
+- 常见节奏：平均约 ${snapshot.averageLength.toFixed(1)} 字；短句比例 ${Math.round(snapshot.shortRate * 100)}%；常出现于 ${String(snapshot.peakHour).padStart(2, "0")}:00 前后。
+- 语言锚点：${phraseText}。
+- 复刻使用原则：优先引用已确认的表达方式，不把推测、星座或生成内容当作事实。
+
+## 可观察的互动线索
+- 关照/安抚类措辞出现 ${careMarkers} 次；这只能说明记录中可见的照应表达，并不代表稳定的关心能力或关系承诺。
+- 修复/澄清类措辞出现 ${repairMarkers} 次；它可作为“冲突后是否尝试说开”的观察入口，而不是谁对谁错的证据。
+- 问句或主动追问线索出现 ${questionMarkers} 次；建议结合具体时间段阅读，而非单独用数量解释在意程度。
+
+## 依恋与关系阅读（非诊断）
+- 若你关心“偏焦虑、偏回避或安全型”之类标签，更可靠的做法是观察具体互动：需要回应时如何表达、压力来临时如何拉开距离、发生误会后是否愿意修复。
+- 现有记录能呈现的是措辞和节奏，不能判断任何人的依恋类型、人格或动机。把“我看到的行为”与“我感受到的需要”分开记录，通常比贴标签更有帮助。
+
+## 自愿背景资料
+- 生日：${birthday}；星座：${zodiac}。
+- 关系背景：${context}。
+- 用户边注：${reflection}。
+- 星座仅作为对方自我叙事或你愿意记录的文化线索，不用于推导性格、兼容性或关系结论。
+
+## 下一次可继续观察
+1. 在真实聊天出现压力、分歧或久未回应时，双方分别会做什么？
+2. 哪些具体措辞会让你感到被理解，哪些会让你想撤退？
+3. 有新的真实表达时，请在“共同画像”中手动确认后加入；不要把 AI 生成的话当作对方新证据。`;
 }
 
 export function localMimic(input: string, messages: CorpusMessage[], roles: Record<string, SpeakerRole>) {
