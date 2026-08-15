@@ -11,6 +11,7 @@ import {
   downloadFile, emptyArchive, loadArchive, localMimic, mergeMessages, messagesForRole,
   parseChatText, personaName, roleOf, sampleCorpus, saveArchive, speakersFor, uid,
 } from "@/lib/archive";
+import { decryptArchive, encryptArchive, isEncryptedArchive } from "@/lib/crypto";
 import { DEFAULT_WORKER_URL, WorkerHealth, checkWorkerHealth, requestOnlineChat } from "@/lib/online";
 
 type Screen = "chat" | "corpus" | "persona" | "insights" | "settings";
@@ -52,6 +53,7 @@ export default function Home() {
   const [workerHealth, setWorkerHealth] = useState<WorkerHealth | null>(null);
   const [testingWorker, setTestingWorker] = useState(false);
   const [sending, setSending] = useState(false);
+  const [backupPassphrase, setBackupPassphrase] = useState("");
   const importInput = useRef<HTMLInputElement>(null);
   const restoreInput = useRef<HTMLInputElement>(null);
 
@@ -168,22 +170,31 @@ export default function Home() {
     toast.success("本地档案已导出");
   };
 
-  const restoreArchive = (event: ChangeEvent<HTMLInputElement>) => {
+  const exportEncryptedArchive = async () => {
+    try {
+      const encrypted = await encryptArchive(archive, backupPassphrase);
+      downloadFile("前任-加密档案.json", encrypted, "application/json;charset=utf-8");
+      setBackupPassphrase("");
+      toast.success("加密档案已导出", { description: "请单独保管口令；网页无法找回口令。" });
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "无法创建加密档案");
+    }
+  };
+
+  const restoreArchive = async (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     if (!file) return;
-    const reader = new FileReader();
-    reader.onload = () => {
-      try {
-        const restored = JSON.parse(String(reader.result ?? "")) as ArchiveState;
-        if (!Array.isArray(restored.messages) || !Array.isArray(restored.sessions)) throw new Error("invalid");
-        setArchive({ messages: restored.messages, roles: restored.roles ?? {}, sessions: restored.sessions, activeSessionId: restored.activeSessionId ?? null });
-        toast.success("本地档案已恢复");
-      } catch {
-        toast.error("无法读取备份文件", { description: "请选择由本网页版导出的 JSON 档案。" });
-      }
-    };
-    reader.readAsText(file);
     event.target.value = "";
+    try {
+      const parsed: unknown = JSON.parse(await file.text());
+      const restored = isEncryptedArchive(parsed) ? await decryptArchive(parsed, backupPassphrase) : parsed as ArchiveState;
+      if (!restored || !Array.isArray(restored.messages) || !Array.isArray(restored.sessions)) throw new Error("invalid");
+      setArchive({ messages: restored.messages, roles: restored.roles ?? {}, sessions: restored.sessions, activeSessionId: restored.activeSessionId ?? null });
+      setBackupPassphrase("");
+      toast.success(isEncryptedArchive(parsed) ? "加密档案已恢复" : "本地档案已恢复");
+    } catch (error) {
+      toast.error(error instanceof Error && error.message !== "invalid" ? error.message : "无法读取备份文件", { description: "请选择本网页版导出的 JSON 档案，并在加密文件时输入对应口令。" });
+    }
   };
 
   const navItems = (Object.keys(screenMeta) as Screen[]).map((key) => ({ key, ...screenMeta[key] }));
@@ -268,7 +279,7 @@ export default function Home() {
         )}
 
         {screen === "settings" && (
-          <section className="settings-layout"><div className="paper-panel settings-paper"><div className="panel-heading"><div><span className="panel-index">S-06</span><h2>浏览器本地设置</h2></div></div><div className="setting-row"><span className="setting-icon"><Database size={18} /></span><div><b>本地档案</b><p>当前数据保存于这个浏览器的 LocalStorage；清理浏览器数据会一并删除。</p></div><span className="setting-status">{archive.messages.length} 条记录</span></div><div className="setting-row worker-row"><span className="setting-icon"><LockKeyhole size={18} /></span><div><b>Cloudflare 在线代理</b><p>浏览器只请求 Worker；模型 API Key 仅保存于 Cloudflare 加密密钥。</p><input className="worker-url-input" value={workerUrl} onChange={(event) => setWorkerUrl(event.target.value)} aria-label="Cloudflare Worker 地址" /></div><div className="worker-controls"><button className="outline-button" onClick={() => void testWorker()} disabled={testingWorker}>{testingWorker ? "检查中…" : "测试连接"}</button><button className={`mode-toggle ${onlineMode ? "is-on" : ""}`} onClick={() => setOnlineMode((value) => !value)} aria-pressed={onlineMode}><span />{onlineMode ? "在线" : "离线"}</button>{workerHealth && <small className={workerHealth.aiConfigured ? "healthy" : "pending"}>{workerHealth.aiConfigured ? "模型已就绪" : "待配置模型密钥"}</small>}</div></div><div className="setting-row"><span className="setting-icon"><FileText size={18} /></span><div><b>可携带备份</b><p>导出包含语料、角色和本地会话；请妥善保管其中的私密内容。</p></div><div className="setting-actions"><button className="outline-button" onClick={exportArchive}><Download size={16} /> 导出</button><button className="outline-button" onClick={() => restoreInput.current?.click()}><Upload size={16} /> 恢复</button><input ref={restoreInput} onChange={restoreArchive} type="file" accept="application/json,.json" hidden /></div></div><div className="danger-zone"><div><b>清空当前浏览器档案</b><p>这会移除语料、角色和会话，无法从浏览器内撤销。</p></div><button className="danger-button" onClick={() => { if (window.confirm("确定清空当前浏览器中的全部前任档案吗？")) { setArchive(emptyArchive()); toast.success("当前浏览器档案已清空"); } }}><Trash2 size={16} /> 清空</button></div></div><aside className="privacy-manifesto"><span className="rail-label">隐私说明</span><h2>记录默认不离开这页。</h2><p>离线模式不请求任何服务。仅在你打开在线模式并发送消息时，才会将该次对话交给 Cloudflare Worker 转发。</p><div className="manifesto-rule" /><small>Worker 不保存消息；模型密钥不会进入浏览器或 GitHub 仓库。</small></aside></section>
+          <section className="settings-layout"><div className="paper-panel settings-paper"><div className="panel-heading"><div><span className="panel-index">S-06</span><h2>浏览器本地设置</h2></div></div><div className="setting-row"><span className="setting-icon"><Database size={18} /></span><div><b>本地档案</b><p>当前数据保存于这个浏览器的 LocalStorage；清理浏览器数据会一并删除。</p></div><span className="setting-status">{archive.messages.length} 条记录</span></div><div className="setting-row worker-row"><span className="setting-icon"><LockKeyhole size={18} /></span><div><b>Cloudflare 在线代理</b><p>浏览器只请求 Worker；模型 API Key 仅保存于 Cloudflare 加密密钥。</p><input className="worker-url-input" value={workerUrl} onChange={(event) => setWorkerUrl(event.target.value)} aria-label="Cloudflare Worker 地址" /></div><div className="worker-controls"><button className="outline-button" onClick={() => void testWorker()} disabled={testingWorker}>{testingWorker ? "检查中…" : "测试连接"}</button><button className={`mode-toggle ${onlineMode ? "is-on" : ""}`} onClick={() => setOnlineMode((value) => !value)} aria-pressed={onlineMode}><span />{onlineMode ? "在线" : "离线"}</button>{workerHealth && <small className={workerHealth.aiConfigured ? "healthy" : "pending"}>{workerHealth.aiConfigured ? "模型已就绪" : "待配置模型密钥"}</small>}</div></div><div className="setting-row backup-row"><span className="setting-icon"><FileText size={18} /></span><div><b>可携带备份</b><p>普通导出为可读 JSON；加密导出使用浏览器内的 PBKDF2 与 AES-GCM，口令无法找回。</p><input className="backup-password" value={backupPassphrase} onChange={(event) => setBackupPassphrase(event.target.value)} type="password" autoComplete="new-password" placeholder="备份口令（至少 12 位）" aria-label="备份口令" /></div><div className="backup-actions"><button className="outline-button" onClick={exportArchive}><Download size={16} /> 普通导出</button><button className="outline-button encrypt-button" onClick={() => void exportEncryptedArchive()}><LockKeyhole size={16} /> 加密导出</button><button className="outline-button" onClick={() => restoreInput.current?.click()}><Upload size={16} /> 恢复</button><small className="backup-note">恢复加密档案前，请先在左侧输入对应口令。</small><input ref={restoreInput} onChange={(event) => void restoreArchive(event)} type="file" accept="application/json,.json" hidden /></div></div><div className="danger-zone"><div><b>清空当前浏览器档案</b><p>这会移除语料、角色和会话，无法从浏览器内撤销。</p></div><button className="danger-button" onClick={() => { if (window.confirm("确定清空当前浏览器中的全部前任档案吗？")) { setArchive(emptyArchive()); toast.success("当前浏览器档案已清空"); } }}><Trash2 size={16} /> 清空</button></div></div><aside className="privacy-manifesto"><span className="rail-label">隐私说明</span><h2>记录默认不离开这页。</h2><p>离线模式不请求任何服务。仅在你打开在线模式并发送消息时，才会将该次对话交给 Cloudflare Worker 转发。</p><div className="manifesto-rule" /><small>Worker 不保存消息；模型密钥不会进入浏览器或 GitHub 仓库。</small></aside></section>
         )}
       </main>
     </div>
