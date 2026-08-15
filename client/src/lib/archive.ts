@@ -1,4 +1,5 @@
 /** 余温档案室：纯浏览器本地数据、语料解析与风格复刻工具。 */
+import { recognize } from "tesseract.js";
 
 export type SpeakerRole = "me" | "ta" | "ignore";
 
@@ -26,8 +27,13 @@ export type ChatSession = {
 
 export type PortraitProfile = {
   targetName: string;
-  birthday: string;
-  zodiac: string;
+  targetBirthday: string;
+  targetZodiac: string;
+  targetGender: string;
+  userName: string;
+  userBirthday: string;
+  userZodiac: string;
+  userGender: string;
   relationshipContext: string;
   reflection: string;
   confirmedSamples: string[];
@@ -56,8 +62,13 @@ const STORAGE_KEY = "qianren-browser-archive-v1";
 
 export const emptyProfile = (): PortraitProfile => ({
   targetName: "",
-  birthday: "",
-  zodiac: "",
+  targetBirthday: "",
+  targetZodiac: "",
+  targetGender: "",
+  userName: "",
+  userBirthday: "",
+  userZodiac: "",
+  userGender: "",
   relationshipContext: "",
   reflection: "",
   confirmedSamples: [],
@@ -133,6 +144,30 @@ export function parseChatText(raw: string): CorpusMessage[] {
     }
   });
   return parsed;
+}
+
+export async function recognizeChatImage(file: File, onProgress?: (progress: number) => void) {
+  const result = await recognize(file, "chi_sim+eng", { logger: (message) => { if (message.status === "recognizing text" && typeof message.progress === "number") onProgress?.(message.progress); } });
+  return result.data.text.replace(/\r/g, "").replace(/[\u200b\ufeff]/g, "").trim();
+}
+
+export type RoleSuggestion = { roles: Record<string, SpeakerRole>; meSpeaker?: string; taSpeaker?: string; confidence: "high" | "medium" | "low"; note: string };
+
+export function inferRoles(messages: CorpusMessage[], profile: Partial<PortraitProfile> = {}): RoleSuggestion {
+  const speakers = speakersFor(messages);
+  if (!speakers.length) return { roles: {}, confidence: "low", note: "没有可供识别的说话人。" };
+  const counts = new Map(speakers.map((speaker) => [speaker, messages.filter((item) => item.speaker === speaker).length]));
+  const normalize = (value: string) => value.trim().toLowerCase();
+  const explicitMe = speakers.find((speaker) => /^(我|me|自己|本人|我自己)$/i.test(speaker) || (profile.userName && normalize(speaker) === normalize(profile.userName)));
+  const explicitTa = speakers.find((speaker) => (profile.targetName && normalize(speaker) === normalize(profile.targetName)) || /^(ta|对方|前任|对象|男朋友|女朋友|老公|老婆)$/i.test(speaker));
+  const ordered = [...speakers].sort((left, right) => (counts.get(right) || 0) - (counts.get(left) || 0));
+  const meSpeaker = explicitMe || (speakers.length === 2 ? ordered[0] : undefined);
+  const taSpeaker = explicitTa || (speakers.length === 2 ? ordered.find((speaker) => speaker !== meSpeaker) : undefined);
+  const roles: Record<string, SpeakerRole> = {};
+  if (meSpeaker) roles[meSpeaker] = "me";
+  if (taSpeaker) roles[taSpeaker] = "ta";
+  if (meSpeaker && taSpeaker) return { roles, meSpeaker, taSpeaker, confidence: explicitMe || explicitTa ? "high" : "medium", note: explicitMe || explicitTa ? "已按称呼或已填写资料识别，请核对。" : "根据两位说话人的记录量进行了初步分配，请务必核对。" };
+  return { roles, meSpeaker, taSpeaker, confidence: "low", note: "无法可靠判断“我”和对方；请在角色列表中手动选择。" };
 }
 
 export function mergeMessages(current: CorpusMessage[], incoming: CorpusMessage[]) {
@@ -244,8 +279,13 @@ export function createIntegratedPortrait(archive: ArchiveState) {
   const evidence = snapshot.taCount + snapshot.meCount;
   const phraseText = snapshot.phrases.length ? snapshot.phrases.map((item) => `“${item.text}”`).join("、") : "暂未形成稳定高频片段";
   const context = archive.profile.relationshipContext.trim() || "尚未补充关系背景";
-  const birthday = archive.profile.birthday.trim() || "未补充";
-  const zodiac = archive.profile.zodiac.trim() || "未补充";
+  const targetBirthday = archive.profile.targetBirthday.trim() || "未补充";
+  const targetZodiac = archive.profile.targetZodiac.trim() || "未补充";
+  const targetGender = archive.profile.targetGender.trim() || "未补充";
+  const userName = archive.profile.userName.trim() || "我";
+  const userBirthday = archive.profile.userBirthday.trim() || "未补充";
+  const userZodiac = archive.profile.userZodiac.trim() || "未补充";
+  const userGender = archive.profile.userGender.trim() || "未补充";
   const reflection = archive.profile.reflection.trim() || "未补充";
   const learningCount = archive.profile.confirmedSamples.length;
   const evidenceNote = evidence < 24 ? "样本仍偏少，以下内容应视为待验证的阅读线索。" : "样本覆盖到多段互动，但结论仍只描述已记录的互动方式。";
@@ -274,9 +314,10 @@ export function createIntegratedPortrait(archive: ArchiveState) {
 - 现有记录能呈现的是措辞和节奏，不能判断任何人的依恋类型、人格或动机。把“我看到的行为”与“我感受到的需要”分开记录，通常比贴标签更有帮助。
 
 ## 自愿背景资料
-- 生日：${birthday}；星座：${zodiac}。
+- 对方资料（自愿填写）：性别/称呼 ${targetGender}；生日 ${targetBirthday}；星座 ${targetZodiac}。
+- 我的资料（自愿填写）：${userName}；性别/称呼 ${userGender}；生日 ${userBirthday}；星座 ${userZodiac}。
 - 关系背景：${context}。
-- 用户边注：${reflection}。
+- 我的边注：${reflection}。
 - 星座仅作为对方自我叙事或你愿意记录的文化线索，不用于推导性格、兼容性或关系结论。
 
 ## 下一次可继续观察

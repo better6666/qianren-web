@@ -2,19 +2,19 @@
 import { ChangeEvent, useEffect, useMemo, useRef, useState } from "react";
 import {
   Archive, BookOpenText, BrainCircuit, ChevronLeft, ChevronRight, ClipboardCopy, CloudOff,
-  Database, Download, FileText, FolderOpen, LockKeyhole, MessageCircleMore, Paperclip,
+  Database, Download, FileText, FolderOpen, ImagePlus, LockKeyhole, MessageCircleMore, Paperclip,
   Plus, SendHorizontal, Settings2, ShieldCheck, Sparkles, Trash2, Upload, UserRound,
 } from "lucide-react";
 import { toast } from "sonner";
 import {
   ArchiveState, ChatSession, CorpusMessage, SpeakerRole, createPersona, createStyleSnapshot,
   createIntegratedPortrait, downloadFile, emptyArchive, loadArchive, localMimic, mergeMessages, messagesForRole,
-  parseChatText, personaName, roleOf, sampleCorpus, saveArchive, speakersFor, uid,
+  inferRoles, parseChatText, personaName, recognizeChatImage, roleOf, sampleCorpus, saveArchive, speakersFor, uid,
 } from "@/lib/archive";
 import { decryptArchive, encryptArchive, isEncryptedArchive } from "@/lib/crypto";
 import { DEFAULT_WORKER_URL, WorkerHealth, checkWorkerHealth, requestOnlineChat } from "@/lib/online";
 import UserApiPanel from "@/components/UserApiPanel";
-import { ApiProbe, ApiProvider, UserApiConfig, loadUserApiConfig, presetFor, probeUserApi, requestUserApiChat, saveUserApiConfig } from "@/lib/user-ai";
+import { ApiProbe, ApiProvider, UserApiConfig, loadUserApiConfig, presetFor, probeUserApi, protocolFor, requestUserApiChat, saveUserApiConfig } from "@/lib/user-ai";
 
 type Screen = "chat" | "corpus" | "persona" | "insights" | "portrait" | "settings";
 
@@ -62,7 +62,10 @@ export default function Home() {
   const [backupPassphrase, setBackupPassphrase] = useState("");
   const [learningSnippet, setLearningSnippet] = useState("");
   const importInput = useRef<HTMLInputElement>(null);
+  const imageImportInput = useRef<HTMLInputElement>(null);
   const restoreInput = useRef<HTMLInputElement>(null);
+  const [imageImporting, setImageImporting] = useState(false);
+  const [ocrProgress, setOcrProgress] = useState(0);
 
   useEffect(() => saveArchive(archive), [archive]);
   useEffect(() => localStorage.setItem("qianren-worker-url", workerUrl), [workerUrl]);
@@ -83,13 +86,15 @@ export default function Home() {
   const importRecords = (raw: string) => {
     const incoming = parseChatText(raw);
     if (!incoming.length) {
-      toast.error("没有识别到记录", { description: "请使用 [09:30] 名称: 内容，或 名称: 内容 的格式。" });
+      toast.error("没有识别到可归档记录", { description: "请核对 OCR 文本，并使用 [08:43] 名称: 内容、日期 时间 名称: 内容或名称: 内容的格式。" });
       return;
     }
     setArchiveSafely((previous) => {
       const merged = mergeMessages(previous.messages, incoming);
-      toast.success(`已归档 ${merged.added} 条记录`, { description: merged.duplicate ? `另有 ${merged.duplicate} 条重复记录未写入。` : "所有处理均在当前浏览器完成。" });
-      return { ...previous, messages: merged.all };
+      const suggestion = inferRoles(merged.all, previous.profile);
+      const roles = { ...suggestion.roles, ...previous.roles };
+      toast.success(`已归档 ${merged.added} 条记录`, { description: `${suggestion.note}${merged.duplicate ? ` 另有 ${merged.duplicate} 条重复记录未写入。` : ""}` });
+      return { ...previous, messages: merged.all, roles };
     });
     setImportText("");
   };
@@ -101,6 +106,29 @@ export default function Home() {
     reader.onload = () => importRecords(String(reader.result ?? ""));
     reader.readAsText(file);
     event.target.value = "";
+  };
+
+  const handleImageFiles = async (event: ChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(event.target.files || []).filter((file) => file.type.startsWith("image/"));
+    event.target.value = "";
+    if (!files.length) return;
+    setImageImporting(true);
+    setOcrProgress(0);
+    try {
+      const parts: string[] = [];
+      for (let index = 0; index < files.length; index += 1) {
+        const text = await recognizeChatImage(files[index], (progress) => setOcrProgress((index + progress) / files.length));
+        if (text) parts.push(text);
+      }
+      if (!parts.length) throw new Error("没有从图片中识别到可读文字");
+      setImportText((previous) => `${previous ? `${previous}\n\n` : ""}${parts.join("\n\n")}`);
+      toast.success("图片文字已在本机识别", { description: "请先核对下方文本与角色，再点击“归档记录”。" });
+    } catch (error) {
+      toast.error("图片识别失败", { description: error instanceof Error ? error.message : "请改用清晰、完整的聊天截图或导入 TXT。" });
+    } finally {
+      setImageImporting(false);
+      setOcrProgress(0);
+    }
   };
 
   const setRole = (speaker: string, role: SpeakerRole) => {
@@ -157,7 +185,7 @@ export default function Home() {
   };
 
   const chooseUserApiProvider = (provider: ApiProvider) => {
-    setUserApi((previous) => ({ ...previous, provider, ...presetFor(provider) }));
+    setUserApi((previous) => ({ ...previous, provider, protocol: protocolFor(provider), ...presetFor(provider), availableModels: [], selectedModels: [] }));
     setUserApiProbe(null);
   };
 
@@ -327,7 +355,7 @@ export default function Home() {
 
         {screen === "corpus" && (
           <section className="corpus-layout">
-            <div className="paper-panel import-panel"><div className="panel-heading"><div><span className="panel-index">I-02</span><h2>导入聊天记录</h2></div><span className="source-note">TXT / 粘贴</span></div><div className="import-workspace"><textarea value={importText} onChange={(event) => setImportText(event.target.value)} placeholder={`支持以下格式：\n[08:43] 我: 想你了\n[08:47] 小雨: 嘴真甜\n\n也可以使用「名称: 内容」逐行粘贴。`} rows={12} /><div className="import-actions"><button className="primary-button" onClick={() => importRecords(importText)} disabled={!importText.trim()}><Archive size={17} /> 归档 {preview.length ? `${preview.length} 条预览` : "记录"}</button><button className="outline-button" onClick={() => importInput.current?.click()}><Paperclip size={17} /> 导入 TXT</button><button className="text-button" onClick={() => setImportText(sampleCorpus)}>载入虚构示例</button><input ref={importInput} onChange={handleTextFile} type="file" accept=".txt,text/plain" hidden /></div></div><div className="import-footnote"><ShieldCheck size={15} /> 解析发生在当前浏览器。网页静态版不读取截图，也不会上传语料。</div></div>
+            <div className="paper-panel import-panel"><div className="panel-heading"><div><span className="panel-index">I-02</span><h2>导入聊天记录</h2></div><span className="source-note">TXT / 图片 / 粘贴</span></div><div className="import-workspace"><textarea value={importText} onChange={(event) => setImportText(event.target.value)} placeholder={`支持以下格式：\n[08:43] 我: 想你了\n[08:47] 小雨: 嘴真甜\n\n也可以导入 TXT 或聊天截图。图片会先在此浏览器 OCR 为文本，请核对后再归档。`} rows={12} /><div className="import-actions"><button className="primary-button" onClick={() => importRecords(importText)} disabled={!importText.trim() || imageImporting}><Archive size={17} /> 归档 {preview.length ? `${preview.length} 条预览` : "记录"}</button><button className="outline-button" onClick={() => importInput.current?.click()}><Paperclip size={17} /> 导入 TXT</button><button className="outline-button" onClick={() => imageImportInput.current?.click()} disabled={imageImporting}><ImagePlus size={17} /> {imageImporting ? `识别中 ${Math.round(ocrProgress * 100)}%` : "导入图片"}</button><button className="text-button" onClick={() => setImportText(sampleCorpus)}>载入虚构示例</button><input ref={importInput} onChange={handleTextFile} type="file" accept=".txt,text/plain" hidden /><input ref={imageImportInput} onChange={(event) => void handleImageFiles(event)} type="file" accept="image/png,image/jpeg,image/webp" multiple hidden /></div></div><div className="import-footnote"><ShieldCheck size={15} /> TXT 直接解析；图片先在当前浏览器本机 OCR，再由你核对文本后归档。系统只做初步角色建议，不会猜测性别、关系或不清晰图片中的内容。</div></div>
             <aside className="import-aside"><img src={importArtUrl} alt="整理中的语料纸页" /><div><span className="rail-label">已归档</span><b>{archive.messages.length} 条</b><p>{speakers.length || 0} 位说话人 · {snapshot.activeDays || 0} 个日期</p></div></aside>
             <div className="paper-panel role-panel"><div className="panel-heading"><div><span className="panel-index">R-03</span><h2>这个人是谁？</h2></div><span className="source-note">角色随时可改</span></div>{speakers.length ? <div className="speaker-table">{speakers.map((speaker, index) => { const currentRole = roleOf(speaker, archive.roles); return <div className="speaker-row" key={speaker}><span className="speaker-number">{String(index + 1).padStart(2, "0")}</span><div className="speaker-name"><b>{speaker}</b><small>{countForSpeaker(archive.messages, speaker)} 条记录</small></div><div className="role-options">{(["me", "ta", "ignore"] as SpeakerRole[]).map((role) => <button key={role} className={currentRole === role ? "selected" : ""} onClick={() => setRole(speaker, role)}>{roleLabel(role)}</button>)}</div></div>; })}</div> : <div className="empty-inline"><UserRound size={20} /><p>导入语料后，在这里指定“我”和“TA”。</p></div>}</div>
           </section>
@@ -342,7 +370,7 @@ export default function Home() {
         )}
 
         {screen === "portrait" && (
-          <section className="portrait-layout"><div className="paper-panel portrait-form"><div className="panel-heading"><div><span className="panel-index">P-06</span><h2>共同画像资料卡</h2></div><span className="source-note">自愿补充 · 本地保存</span></div><div className="profile-grid"><label>TA 称呼<input value={archive.profile.targetName} onChange={(event) => updateProfile("targetName", event.target.value)} placeholder={persona === "TA" ? "例如：小雨" : persona} /></label><label>生日<input value={archive.profile.birthday} onChange={(event) => updateProfile("birthday", event.target.value)} placeholder="例如：1998-07-18（可留空）" /></label><label>星座<input value={archive.profile.zodiac} onChange={(event) => updateProfile("zodiac", event.target.value)} placeholder="例如：巨蟹座（仅作文化线索）" /></label><label>关系背景<input value={archive.profile.relationshipContext} onChange={(event) => updateProfile("relationshipContext", event.target.value)} placeholder="例如：分开后仍偶尔联系" /></label><label className="profile-wide">我的边注<textarea value={archive.profile.reflection} onChange={(event) => updateProfile("reflection", event.target.value)} placeholder="写下你希望在报告中保留的真实背景、界限或待观察的问题。" rows={3} /></label></div><div className="learning-ledger"><div><span className="rail-label">确认学习</span><h3>只加入真实且由你确认的表达</h3><p>AI 在本页生成的回复不会自动变成 TA 的新语料，避免“越学越像自己”的循环。</p></div><textarea value={learningSnippet} onChange={(event) => setLearningSnippet(event.target.value)} placeholder="粘贴一条新增的真实聊天表达，例如：‘到了和我说一声。’" rows={3} /><button className="primary-button" onClick={confirmLearning}><Archive size={16} /> 确认加入</button><small>已确认 {archive.profile.confirmedSamples.length} 条补充样本</small></div></div><div className="paper-panel integrated-portrait"><div className="panel-heading"><div><span className="panel-index">F-07</span><h2>最后的综合画像</h2></div><button className="micro-action labelled" onClick={() => downloadFile("前任-综合互动画像.md", integratedPortrait, "text/markdown;charset=utf-8")}><Download size={15} /> 导出报告</button></div><pre>{integratedPortrait}</pre></div><aside className="portrait-rail"><div className="rail-card"><span className="rail-label">证据边界</span><b>{snapshot.taCount + snapshot.meCount} 条真实记录</b><p>报告只读取本地档案与明确确认的补充样本；生成回复不回写为证据。</p></div><div className="rail-card caution-card"><span className="rail-label">关系阅读</span><p>依恋、人格和“人性”问题只以互动线索讨论，不给任何人贴诊断式标签。</p></div><button className="outline-button rail-action" onClick={() => setScreen("insights")}><BookOpenText size={16} /> 查看关系边注</button></aside></section>
+          <section className="portrait-layout"><div className="paper-panel portrait-form"><div className="panel-heading"><div><span className="panel-index">P-06</span><h2>共同画像资料卡</h2></div><span className="source-note">自愿补充 · 本地保存</span></div><div className="profile-grid"><label>我的称呼<input value={archive.profile.userName} onChange={(event) => updateProfile("userName", event.target.value)} placeholder="例如：阿林（可留空）" /></label><label>我的性别/称呼<input value={archive.profile.userGender} onChange={(event) => updateProfile("userGender", event.target.value)} placeholder="例如：男 / 女 / 非二元（可留空）" /></label><label>我的生日<input value={archive.profile.userBirthday} onChange={(event) => updateProfile("userBirthday", event.target.value)} placeholder="例如：1998-07-18（可留空）" /></label><label>我的星座<input value={archive.profile.userZodiac} onChange={(event) => updateProfile("userZodiac", event.target.value)} placeholder="例如：巨蟹座（可留空）" /></label><label>对方称呼<input value={archive.profile.targetName} onChange={(event) => updateProfile("targetName", event.target.value)} placeholder={persona === "TA" ? "例如：小雨" : persona} /></label><label>对方性别/称呼<input value={archive.profile.targetGender} onChange={(event) => updateProfile("targetGender", event.target.value)} placeholder="例如：男 / 女 / 非二元（可留空）" /></label><label>对方生日<input value={archive.profile.targetBirthday} onChange={(event) => updateProfile("targetBirthday", event.target.value)} placeholder="例如：1998-07-18（可留空）" /></label><label>对方星座<input value={archive.profile.targetZodiac} onChange={(event) => updateProfile("targetZodiac", event.target.value)} placeholder="例如：摩羯座（可留空）" /></label><label>关系背景<input value={archive.profile.relationshipContext} onChange={(event) => updateProfile("relationshipContext", event.target.value)} placeholder="例如：分开后仍偶尔联系" /></label><label className="profile-wide">我的边注<textarea value={archive.profile.reflection} onChange={(event) => updateProfile("reflection", event.target.value)} placeholder="写下你希望在报告中保留的真实背景、界限或待观察的问题。星座仅作为文化线索，不用于推断性格或兼容性。" rows={3} /></label></div><div className="learning-ledger"><div><span className="rail-label">确认学习</span><h3>只加入真实且由你确认的表达</h3><p>AI 在本页生成的回复不会自动变成 TA 的新语料，避免“越学越像自己”的循环。</p></div><textarea value={learningSnippet} onChange={(event) => setLearningSnippet(event.target.value)} placeholder="粘贴一条新增的真实聊天表达，例如：‘到了和我说一声。’" rows={3} /><button className="primary-button" onClick={confirmLearning}><Archive size={16} /> 确认加入</button><small>已确认 {archive.profile.confirmedSamples.length} 条补充样本</small></div></div><div className="paper-panel integrated-portrait"><div className="panel-heading"><div><span className="panel-index">F-07</span><h2>最后的综合画像</h2></div><button className="micro-action labelled" onClick={() => downloadFile("前任-综合互动画像.md", integratedPortrait, "text/markdown;charset=utf-8")}><Download size={15} /> 导出报告</button></div><pre>{integratedPortrait}</pre></div><aside className="portrait-rail"><div className="rail-card"><span className="rail-label">证据边界</span><b>{snapshot.taCount + snapshot.meCount} 条真实记录</b><p>报告只读取本地档案与明确确认的补充样本；生成回复不回写为证据。</p></div><div className="rail-card caution-card"><span className="rail-label">关系阅读</span><p>依恋、人格和“人性”问题只以互动线索讨论，不给任何人贴诊断式标签。</p></div><button className="outline-button rail-action" onClick={() => setScreen("insights")}><BookOpenText size={16} /> 查看关系边注</button></aside></section>
         )}
 
         {screen === "settings" && (

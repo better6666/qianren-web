@@ -1,10 +1,12 @@
 export type ApiProvider = "openai" | "anthropic" | "gemini" | "grok" | "minimax" | "zhipu" | "qwen" | "doubao" | "deepseek" | "baichuan" | "01ai" | "moonshot" | "custom";
 export type ConnectionMode = "direct" | "relay";
+export type ApiProtocol = "openai" | "openai-compatible" | "anthropic" | "gemini";
 export type ApiModel = { id: string; ownedBy?: string };
 
 export type UserApiConfig = {
   enabled: boolean;
   provider: ApiProvider;
+  protocol: ApiProtocol;
   connectionMode: ConnectionMode;
   baseUrl: string;
   model: string;
@@ -33,15 +35,22 @@ const defaults: Record<ApiProvider, Pick<UserApiConfig, "baseUrl" | "model">> = 
   custom: { baseUrl: "", model: "" },
 };
 
+export function protocolFor(provider: ApiProvider): ApiProtocol {
+  if (provider === "anthropic") return "anthropic";
+  if (provider === "gemini") return "gemini";
+  if (provider === "openai") return "openai";
+  return "openai-compatible";
+}
+
 export function defaultUserApiConfig(): UserApiConfig {
-  return { enabled: false, provider: "openai", connectionMode: "direct", ...defaults.openai, apiKey: "", rememberKey: false, availableModels: [], selectedModels: [] };
+  return { enabled: false, provider: "openai", protocol: "openai", connectionMode: "direct", ...defaults.openai, apiKey: "", rememberKey: false, availableModels: [], selectedModels: [] };
 }
 
 export function loadUserApiConfig(): UserApiConfig {
   try {
     const saved = JSON.parse(localStorage.getItem(STORAGE_KEY) || localStorage.getItem("qianren-user-api-v1") || "{}") as Partial<UserApiConfig>;
     const provider = saved.provider && defaults[saved.provider] ? saved.provider : "openai";
-    return { ...defaultUserApiConfig(), ...defaults[provider], ...saved, provider, availableModels: saved.availableModels || [], selectedModels: saved.selectedModels || [], apiKey: saved.rememberKey ? saved.apiKey || "" : "" };
+    return { ...defaultUserApiConfig(), ...defaults[provider], ...saved, provider, protocol: saved.protocol || protocolFor(provider), availableModels: saved.availableModels || [], selectedModels: saved.selectedModels || [], apiKey: saved.rememberKey ? saved.apiKey || "" : "" };
   } catch { return defaultUserApiConfig(); }
 }
 
@@ -53,7 +62,7 @@ export function saveUserApiConfig(config: UserApiConfig) {
 export function presetFor(provider: ApiProvider) { return defaults[provider]; }
 function root(url: string) { return url.trim().replace(/\/+$/, ""); }
 function headers(config: UserApiConfig): Record<string, string> {
-  if (config.provider === "anthropic") return { "content-type": "application/json", "x-api-key": config.apiKey, "anthropic-version": "2023-06-01" };
+  if (config.protocol === "anthropic") return { "content-type": "application/json", "x-api-key": config.apiKey, "anthropic-version": "2023-06-01" };
   return { "content-type": "application/json", Authorization: `Bearer ${config.apiKey}` };
 }
 async function readFailure(response: Response) { const text = await response.text().catch(() => ""); try { return JSON.parse(text)?.error?.message || JSON.parse(text)?.message || text; } catch { return text; } }
@@ -61,8 +70,8 @@ async function readFailure(response: Response) { const text = await response.tex
 export async function fetchUserApiModels(config: UserApiConfig): Promise<{ models: ApiModel[]; latencyMs: number }> {
   if (!config.baseUrl.trim() || !config.apiKey.trim()) throw new Error("请先填写 Base URL 与 API Key。");
   const startedAt = performance.now();
-  const url = config.provider === "gemini" ? `${root(config.baseUrl)}/models?key=${encodeURIComponent(config.apiKey)}` : `${root(config.baseUrl)}/models`;
-  const response = await fetch(url, { method: "GET", headers: config.provider === "gemini" ? undefined : headers(config) });
+  const url = config.protocol === "gemini" ? `${root(config.baseUrl)}/models?key=${encodeURIComponent(config.apiKey)}` : `${root(config.baseUrl)}/models`;
+  const response = await fetch(url, { method: "GET", headers: config.protocol === "gemini" ? undefined : headers(config) });
   const latencyMs = Math.round(performance.now() - startedAt);
   if (!response.ok) throw new Error((await readFailure(response)) || `HTTP ${response.status}`);
   const payload = await response.json();
@@ -81,11 +90,11 @@ export async function requestUserApiChat(config: UserApiConfig, system: string, 
   if (!config.apiKey.trim()) throw new Error("请在“用户自带 AI”中填写 API Key。");
   const requestMessages = [{ role: "system", content: system }, ...messages];
   let response: Response;
-  if (config.provider === "anthropic") {
+  if (config.protocol === "anthropic") {
     response = await fetch(`${root(config.baseUrl)}/messages`, { method: "POST", headers: headers(config), body: JSON.stringify({ model: config.model, max_tokens: 420, system, messages }) });
     if (!response.ok) throw new Error((await readFailure(response)) || "Anthropic 接口请求失败。"); const payload = await response.json(); const text = payload?.content?.find((item: { type?: string }) => item.type === "text")?.text; if (typeof text !== "string") throw new Error("Anthropic 返回了无效回复。"); return text;
   }
-  if (config.provider === "gemini") {
+  if (config.protocol === "gemini") {
     response = await fetch(`${root(config.baseUrl)}/models/${encodeURIComponent(config.model)}:generateContent?key=${encodeURIComponent(config.apiKey)}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ systemInstruction: { parts: [{ text: system }] }, contents: messages.map((message) => ({ role: message.role === "assistant" ? "model" : "user", parts: [{ text: message.content }] })) }) });
     if (!response.ok) throw new Error((await readFailure(response)) || "Gemini 接口请求失败。"); const payload = await response.json(); const text = payload?.candidates?.[0]?.content?.parts?.[0]?.text; if (typeof text !== "string") throw new Error("Gemini 返回了无效回复。"); return text;
   }
