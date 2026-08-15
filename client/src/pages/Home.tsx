@@ -13,6 +13,8 @@ import {
 } from "@/lib/archive";
 import { decryptArchive, encryptArchive, isEncryptedArchive } from "@/lib/crypto";
 import { DEFAULT_WORKER_URL, WorkerHealth, checkWorkerHealth, requestOnlineChat } from "@/lib/online";
+import UserApiPanel from "@/components/UserApiPanel";
+import { ApiProbe, ApiProvider, UserApiConfig, loadUserApiConfig, presetFor, probeUserApi, requestUserApiChat, saveUserApiConfig } from "@/lib/user-ai";
 
 type Screen = "chat" | "corpus" | "persona" | "insights" | "portrait" | "settings";
 
@@ -53,6 +55,9 @@ export default function Home() {
   const [onlineMode, setOnlineMode] = useState(() => localStorage.getItem("qianren-online-mode") === "true");
   const [workerHealth, setWorkerHealth] = useState<WorkerHealth | null>(null);
   const [testingWorker, setTestingWorker] = useState(false);
+  const [userApi, setUserApi] = useState<UserApiConfig>(() => loadUserApiConfig());
+  const [userApiProbe, setUserApiProbe] = useState<ApiProbe | null>(null);
+  const [testingUserApi, setTestingUserApi] = useState(false);
   const [sending, setSending] = useState(false);
   const [backupPassphrase, setBackupPassphrase] = useState("");
   const [learningSnippet, setLearningSnippet] = useState("");
@@ -62,6 +67,7 @@ export default function Home() {
   useEffect(() => saveArchive(archive), [archive]);
   useEffect(() => localStorage.setItem("qianren-worker-url", workerUrl), [workerUrl]);
   useEffect(() => localStorage.setItem("qianren-online-mode", String(onlineMode)), [onlineMode]);
+  useEffect(() => saveUserApiConfig(userApi), [userApi]);
 
   const snapshot = useMemo(() => createStyleSnapshot(archive.messages, archive.roles), [archive.messages, archive.roles]);
   const currentPersona = useMemo(() => createPersona(archive.messages, archive.roles), [archive.messages, archive.roles]);
@@ -145,6 +151,32 @@ export default function Home() {
     }
   };
 
+  const updateUserApi = (patch: Partial<UserApiConfig>) => {
+    setUserApi((previous) => ({ ...previous, ...patch }));
+    if (patch.enabled) setOnlineMode(true);
+  };
+
+  const chooseUserApiProvider = (provider: ApiProvider) => {
+    setUserApi((previous) => ({ ...previous, provider, ...presetFor(provider) }));
+    setUserApiProbe(null);
+  };
+
+  const testUserApi = async () => {
+    setTestingUserApi(true);
+    try {
+      const result = await probeUserApi(userApi);
+      setUserApiProbe(result);
+      if (result.ok) toast.success("用户 API 已连通", { description: `模型列表响应 ${result.latencyMs} ms。` });
+      else toast.error("用户 API 未连通", { description: result.message });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "无法测试该接口";
+      setUserApiProbe({ ok: false, latencyMs: 0, message, checkedAt: Date.now() });
+      toast.error("用户 API 未连通", { description: message });
+    } finally {
+      setTestingUserApi(false);
+    }
+  };
+
   const send = async () => {
     const text = draft.trim();
     if (!text || sending) return;
@@ -164,7 +196,11 @@ export default function Home() {
     setSending(true);
     let response: string;
     try {
-      response = onlineMode ? await requestOnlineChat(workerUrl, currentPersona, history) : localMimic(text, archive.messages, archive.roles);
+      response = onlineMode
+        ? userApi.enabled
+          ? await requestUserApiChat(userApi, currentPersona, history)
+          : await requestOnlineChat(workerUrl, currentPersona, history)
+        : localMimic(text, archive.messages, archive.roles);
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "在线回复失败", { description: "已保留本地档案；可切换回离线模式。" });
       setSending(false);
@@ -279,7 +315,7 @@ export default function Home() {
                 <div className="chat-empty"><div className="hero-paper"><img src={heroUrl} alt="档案纸张与索引卡" /><div className="archive-artifacts" aria-hidden="true"><span className="source-slip slip-a">SOURCE<br/>FRAGMENT</span><span className="source-slip slip-b">归档中</span><i /></div><div className="hero-overlay"><span>LOCAL REPLICA · NOT A PERSON</span><p>记录里的语言习惯，会留下一些线索。</p></div></div><p>先归档记录，再开始一段本地离线对话。</p></div>
               )}
               <div className="composer"><textarea value={draft} onChange={(event) => setDraft(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); void send(); } }} placeholder={snapshot.taCount ? `对 ${persona} 说点什么…` : "请先导入并分配语料"} rows={2} /><button className="send-button" onClick={() => void send()} aria-label="发送" disabled={sending}>{sending ? <span className="send-loading" /> : <SendHorizontal size={18} />}</button></div>
-              <p className="composer-note">Enter 发送 · {onlineMode ? "由 Cloudflare Worker 代理在线模型；密钥不进入浏览器。" : "本地检索原始语料表达，不调用模型服务。"}</p>
+              <p className="composer-note">Enter 发送 · {onlineMode ? userApi.enabled ? "由你的 API 直接请求模型；密钥仅在此浏览器使用。" : "由 Cloudflare Worker 代理在线模型；密钥不进入浏览器。" : "本地检索原始语料表达，不调用模型服务。"}</p>
             </div>
             <aside className="margin-rail">
               <div className="rail-card identity-card"><span className="rail-label">当前复刻</span><div className="persona-token"><span>{persona.slice(0, 1)}</span><div><b>{persona}</b><small>由 {snapshot.taCount} 条 TA 语料整理</small></div></div><div className="identity-rule" /><p>不是本人，也不替代现实沟通。</p></div>
@@ -311,6 +347,9 @@ export default function Home() {
 
         {screen === "settings" && (
           <section className="settings-layout"><div className="paper-panel settings-paper"><div className="panel-heading"><div><span className="panel-index">S-06</span><h2>浏览器本地设置</h2></div></div><div className="setting-row"><span className="setting-icon"><Database size={18} /></span><div><b>本地档案</b><p>当前数据保存于这个浏览器的 LocalStorage；清理浏览器数据会一并删除。</p></div><span className="setting-status">{archive.messages.length} 条记录</span></div><div className="setting-row worker-row"><span className="setting-icon"><LockKeyhole size={18} /></span><div><b>Cloudflare 在线代理</b><p>浏览器只请求 Worker；模型 API Key 仅保存于 Cloudflare 加密密钥。</p><input className="worker-url-input" value={workerUrl} onChange={(event) => setWorkerUrl(event.target.value)} aria-label="Cloudflare Worker 地址" /></div><div className="worker-controls"><button className="outline-button" onClick={() => void testWorker()} disabled={testingWorker}>{testingWorker ? "检查中…" : "测试连接"}</button><button className={`mode-toggle ${onlineMode ? "is-on" : ""}`} onClick={() => setOnlineMode((value) => !value)} aria-pressed={onlineMode}><span />{onlineMode ? "在线" : "离线"}</button>{workerHealth && <small className={workerHealth.aiConfigured ? "healthy" : "pending"}>{workerHealth.aiConfigured ? "模型已就绪" : "待配置模型密钥"}</small>}</div></div><div className="setting-row backup-row"><span className="setting-icon"><FileText size={18} /></span><div><b>可携带备份</b><p>普通导出为可读 JSON；加密导出使用浏览器内的 PBKDF2 与 AES-GCM，口令无法找回。</p><input className="backup-password" value={backupPassphrase} onChange={(event) => setBackupPassphrase(event.target.value)} type="password" autoComplete="new-password" placeholder="备份口令（至少 12 位）" aria-label="备份口令" /></div><div className="backup-actions"><button className="outline-button" onClick={exportArchive}><Download size={16} /> 普通导出</button><button className="outline-button encrypt-button" onClick={() => void exportEncryptedArchive()}><LockKeyhole size={16} /> 加密导出</button><button className="outline-button" onClick={() => restoreInput.current?.click()}><Upload size={16} /> 恢复</button><small className="backup-note">恢复加密档案前，请先在左侧输入对应口令。</small><input ref={restoreInput} onChange={(event) => void restoreArchive(event)} type="file" accept="application/json,.json" hidden /></div></div><div className="danger-zone"><div><b>清空当前浏览器档案</b><p>这会移除语料、角色和会话，无法从浏览器内撤销。</p></div><button className="danger-button" onClick={() => { if (window.confirm("确定清空当前浏览器中的全部前任档案吗？")) { setArchive(emptyArchive()); toast.success("当前浏览器档案已清空"); } }}><Trash2 size={16} /> 清空</button></div></div><aside className="privacy-manifesto"><span className="rail-label">隐私说明</span><h2>记录默认不离开这页。</h2><p>离线模式不请求任何服务。仅在你打开在线模式并发送消息时，才会将该次对话交给 Cloudflare Worker 转发。</p><div className="manifesto-rule" /><small>Worker 不保存消息；模型密钥不会进入浏览器或 GitHub 仓库。</small></aside></section>
+        )}
+        {screen === "settings" && (
+          <section className="settings-layout user-api-settings"><div className="paper-panel settings-paper"><UserApiPanel config={userApi} probe={userApiProbe} testing={testingUserApi} onChange={updateUserApi} onProvider={chooseUserApiProvider} onTest={() => void testUserApi()} /></div><aside className="privacy-manifesto user-api-manifesto"><span className="rail-label">API 边界</span><h2>由你掌控连接。</h2><p>直连会将本次消息发往你填写的服务商；中转站会由中转站接收。请只填写自己信任的地址。</p><div className="manifesto-rule" /><small>开启“仅在此浏览器保存”后，Key 以明文保留在本浏览器 LocalStorage；公共设备不建议开启。</small></aside></section>
         )}
       </main>
     </div>
