@@ -1,0 +1,5 @@
+# 前任在线代理：部署到 Cloudflare Workers；模型密钥仅通过 Worker Secret 配置。
+name = "qianren-api"
+main = "src/index.js"
+compatibility_date = "2026-08-15"
+workers_dev = true

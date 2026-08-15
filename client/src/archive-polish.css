@@ -1,0 +1,15 @@
+/* 余温档案室：可识别的书脊、纸纤维、校对线与来源卡片。 */
+.archive-sidebar::before { content: ""; position: absolute; top: 18px; bottom: 17px; left: 8px; width: 1px; background: repeating-linear-gradient(to bottom, rgba(215,160,168,.76) 0 3px, transparent 3px 10px); opacity: .72; }
+.brand-copy small, .local-status small { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .07em; }
+.nav-item.is-active { background: linear-gradient(90deg, rgba(71,127,113,.34), rgba(71,127,113,.12)); box-shadow: inset 0 1px rgba(255,255,255,.055), inset 0 -1px rgba(255,255,255,.035); }
+.chapter-label, .panel-index, .source-note { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.folio-stamp { display: inline-flex; border: 1px solid #b5757f; padding: 4px 6px 3px; color: #9b5364; text-align: center; font: 700 8px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .06em; transform: rotate(-2deg); }
+.paper-panel { background-color: #fbf9f3; background-image: linear-gradient(90deg, transparent 0 34px, rgba(161,90,104,.09) 34px 35px, transparent 35px), repeating-linear-gradient(0deg, rgba(98,94,78,.018) 0 1px, transparent 1px 5px); box-shadow: 0 15px 32px rgba(43,47,40,.075), 7px 8px 0 -6px rgba(155,83,100,.28); }
+.hero-paper { background: #d4cec3; }
+.archive-artifacts { position: absolute; inset: 0; pointer-events: none; }
+.source-slip { position: absolute; display: block; padding: 7px 8px; color: #2f6258; background: rgba(249,245,235,.92); box-shadow: 3px 4px 0 rgba(26,43,45,.16); font: 700 8px/1.35 ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .09em; }
+.slip-a { top: 13px; right: 17px; transform: rotate(4deg); }
+.slip-b { right: 83px; bottom: 14px; color: #8e4f5d; transform: rotate(-5deg); }
+.archive-artifacts i { position: absolute; top: -4px; right: 47px; width: 28px; height: 7px; background: rgba(132,95,80,.63); transform: rotate(11deg); }
+.hero-overlay span { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 9px; letter-spacing: .13em; }
+@media (max-width: 780px) { .folio-stamp { display: none; } }
